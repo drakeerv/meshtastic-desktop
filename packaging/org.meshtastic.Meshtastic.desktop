@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Meshtastic
+GenericName=Mesh Radio
+Comment=Meshtastic client for Linux
+Exec=@EXEC@
+Icon=org.meshtastic.Meshtastic
+Terminal=false
+Categories=Network;Utility;
+StartupWMClass=org.meshtastic.Meshtastic
+Keywords=meshtastic;mesh;lora;radio;

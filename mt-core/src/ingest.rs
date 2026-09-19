@@ -1,0 +1,309 @@
+//! Ingest of `FromRadio` messages: handshake data, live packets and
+//! administrative responses. Everything is folded into [`MeshState`],
+//! persisted when a device database is open, and announced to the UI.
+
+use meshtastic_protobufs::meshtastic::{
+    AdminMessage, Channel, Config, Data, DeviceMetadata, FromRadio, MeshPacket, ModuleConfig,
+    MyNodeInfo, NodeInfo, PortNum, Position, RouteDiscovery, Telemetry, User, admin_message,
+    from_radio, mesh_packet,
+};
+use mt_persistence::MessageStatus;
+use prost::Message as _;
+
+use crate::events::CoreEvent;
+use crate::supervisor::Supervisor;
+
+impl Supervisor {
+    /// Route one `FromRadio` message.
+    pub(crate) async fn handle_from_radio(&mut self, msg: FromRadio) {
+        use from_radio::PayloadVariant as V;
+        match msg.payload_variant {
+            Some(V::MyInfo(info)) => self.on_my_info(info),
+            Some(V::Metadata(metadata)) => self.on_metadata(metadata),
+            Some(V::Config(config)) => self.on_config(config),
+            Some(V::ModuleConfig(config)) => self.on_module_config(config),
+            Some(V::Channel(channel)) => self.on_channel(channel),
+            Some(V::NodeInfo(node)) => self.on_node_info(node),
+            Some(V::Packet(packet)) => self.handle_packet(packet),
+            Some(V::QueueStatus(status)) => self.handle_queue_status(status),
+            Some(V::ConfigCompleteId(nonce)) => self.on_config_complete(nonce).await,
+            Some(V::Rebooted(from_dfu)) => self.emit(CoreEvent::Rebooted { from_dfu }),
+            Some(V::LogRecord(record)) => {
+                let line = if record.source.is_empty() {
+                    record.message
+                } else {
+                    format!("{}: {}", record.source, record.message)
+                };
+                self.emit(CoreEvent::DeviceLog(line));
+            }
+            // Not yet surfaced in the UI.
+            Some(V::ClientNotification(_))
+            | Some(V::XmodemPacket(_))
+            | Some(V::MqttClientProxyMessage(_))
+            | Some(V::FileInfo(_))
+            | Some(V::DeviceuiConfig(_))
+            | None => {}
+        }
+    }
+
+    fn on_my_info(&mut self, info: MyNodeInfo) {
+        self.state.my_node_num = Some(info.my_node_num);
+        self.state.my_info = Some(info.clone());
+        self.emit(CoreEvent::MyInfo(Box::new(info.clone())));
+
+        // Node number unlocks the per-device database.
+        if self.db_node != Some(info.my_node_num) {
+            self.open_device_db(info.my_node_num);
+            if let Some(db) = &self.db {
+                let _ = db.set_my_node_num(info.my_node_num);
+            }
+        }
+    }
+
+    fn on_metadata(&mut self, metadata: DeviceMetadata) {
+        self.state.metadata = Some(metadata.clone());
+        if let Some(db) = &self.db {
+            if !metadata.firmware_version.is_empty() {
+                let _ = db.set_firmware_version(&metadata.firmware_version);
+            }
+        }
+        self.emit(CoreEvent::Metadata(Box::new(metadata)));
+    }
+
+    fn on_config(&mut self, config: Config) {
+        self.state.apply_config(config.clone());
+        if let Some(db) = &self.db {
+            let _ = db.replace_configs(std::slice::from_ref(&config));
+        }
+        self.emit(CoreEvent::Config(Box::new(config)));
+    }
+
+    fn on_module_config(&mut self, config: ModuleConfig) {
+        self.state.apply_module_config(config.clone());
+        if let Some(db) = &self.db {
+            let _ = db.replace_module_configs(std::slice::from_ref(&config));
+        }
+        self.emit(CoreEvent::ModuleConfig(Box::new(config)));
+    }
+
+    fn on_channel(&mut self, channel: Channel) {
+        self.state.apply_channel(channel.clone());
+        if let Some(db) = &self.db {
+            let _ = db.upsert_channel(&channel);
+        }
+        self.emit(CoreEvent::Channel(Box::new(channel)));
+    }
+
+    fn on_node_info(&mut self, node: NodeInfo) {
+        let stored = self.state.upsert_node(node);
+        if let Some(db) = &self.db {
+            let _ = db.upsert_node(&stored);
+        }
+        self.emit(CoreEvent::Node(Box::new(stored)));
+    }
+
+    /// Handle a mesh packet by port number.
+    pub(crate) fn handle_packet(&mut self, packet: MeshPacket) {
+        let data = match &packet.payload_variant {
+            Some(mesh_packet::PayloadVariant::Decoded(data)) => data.clone(),
+            // Encrypted packets carry no readable payload (yet); still note
+            // that the sender was heard.
+            _ => {
+                self.touch_node(&packet);
+                return;
+            }
+        };
+
+        match PortNum::try_from(data.portnum).unwrap_or(PortNum::UnknownApp) {
+            PortNum::TextMessageApp | PortNum::AlertApp => self.on_text_packet(&packet, &data),
+            PortNum::RoutingApp => self.handle_routing(&data),
+            PortNum::PositionApp => self.on_position_packet(&packet, &data),
+            PortNum::TelemetryApp => self.on_telemetry_packet(&packet, &data),
+            PortNum::NodeinfoApp => self.on_nodeinfo_packet(&packet, &data),
+            PortNum::TracerouteApp => self.on_traceroute_packet(&packet, &data),
+            PortNum::AdminApp => self.on_admin_packet(&packet, &data),
+            _ => self.touch_node(&packet),
+        }
+    }
+
+    fn on_text_packet(&mut self, packet: &MeshPacket, _data: &Data) {
+        let outgoing = self
+            .state
+            .my_num()
+            .map(|my| packet.from == my)
+            .unwrap_or(false);
+        let status = if outgoing {
+            MessageStatus::Enroute
+        } else {
+            MessageStatus::Delivered
+        };
+
+        if let Some(db) = &self.db {
+            let sent_at = (packet.rx_time != 0).then_some(packet.rx_time as i64);
+            let _ = db.insert_message(packet, outgoing, status, sent_at);
+        }
+        self.emit_stored_message(packet.id, outgoing);
+
+        if outgoing {
+            self.update_status(packet.id, true, MessageStatus::Enroute, None);
+        } else {
+            self.touch_node(packet);
+        }
+    }
+
+    fn on_position_packet(&mut self, packet: &MeshPacket, data: &Data) {
+        let Ok(position) = Position::decode(data.payload.as_slice()) else {
+            return;
+        };
+        let node_num = packet.from;
+
+        if packet.rx_rssi != 0 {
+            self.state.rssi.insert(node_num, packet.rx_rssi as i32);
+            self.emit(CoreEvent::Rssi {
+                node_num,
+                rssi: packet.rx_rssi as i32,
+            });
+        }
+
+        if let Some(mut node) = self.state.nodes.get(&node_num).cloned() {
+            node.position = Some(position.clone());
+            if packet.rx_time != 0 {
+                node.last_heard = packet.rx_time;
+            }
+            if packet.rx_snr != 0.0 {
+                node.snr = packet.rx_snr;
+            }
+            let node = self.state.upsert_node(node);
+            if let Some(db) = &self.db {
+                let _ = db.upsert_node(&node);
+                let _ = db.insert_position(node_num, &position);
+            }
+            self.emit(CoreEvent::Node(Box::new(node)));
+        } else if let Some(db) = &self.db {
+            let _ = db.insert_position(node_num, &position);
+        }
+
+        self.emit(CoreEvent::Position {
+            node_num,
+            position: Box::new(position),
+        });
+    }
+
+    fn on_telemetry_packet(&mut self, packet: &MeshPacket, data: &Data) {
+        let Ok(telemetry) = Telemetry::decode(data.payload.as_slice()) else {
+            return;
+        };
+        if let Some(db) = &self.db {
+            let _ = db.insert_telemetry(packet.from, &telemetry);
+        }
+        self.emit(CoreEvent::Telemetry {
+            node_num: packet.from,
+            telemetry: Box::new(telemetry),
+        });
+        self.touch_node(packet);
+    }
+
+    fn on_nodeinfo_packet(&mut self, packet: &MeshPacket, data: &Data) {
+        // Node info can arrive either as a NodeInfo payload or wrapped in a
+        // User payload; try NodeInfo first, then fall back to User.
+        if let Ok(node) = NodeInfo::decode(data.payload.as_slice()) {
+            self.on_node_info(node);
+        } else if let Ok(user) = User::decode(data.payload.as_slice()) {
+            let mut node = NodeInfo {
+                num: packet.from,
+                user: Some(user),
+                last_heard: packet.rx_time,
+                snr: packet.rx_snr,
+                ..Default::default()
+            };
+            if let Some(existing) = self.state.nodes.get(&packet.from) {
+                node.position = existing.position.clone();
+                node.device_metrics = existing.device_metrics.clone();
+            }
+            self.on_node_info(node);
+        }
+    }
+
+    fn on_traceroute_packet(&mut self, packet: &MeshPacket, data: &Data) {
+        let Ok(route) = RouteDiscovery::decode(data.payload.as_slice()) else {
+            return;
+        };
+        self.emit(CoreEvent::Traceroute {
+            packet_id: data.request_id,
+            from: packet.from,
+            route: route.route,
+            snr_towards: route.snr_towards,
+            route_back: route.route_back,
+            snr_back: route.snr_back,
+        });
+    }
+
+    fn on_admin_packet(&mut self, packet: &MeshPacket, data: &Data) {
+        let Ok(admin) = AdminMessage::decode(data.payload.as_slice()) else {
+            return;
+        };
+        // Firmware echoes a session passkey in admin responses; keep the
+        // latest so our own writes carry it (required by newer firmware).
+        if !admin.session_passkey.is_empty() {
+            self.session_passkey = admin.session_passkey.clone();
+        }
+        match admin.payload_variant {
+            Some(admin_message::PayloadVariant::GetOwnerResponse(user)) => {
+                let node_num = self.state.my_num().unwrap_or(packet.from);
+                if let Some(mut node) = self.state.nodes.get(&node_num).cloned() {
+                    node.user = Some(user);
+                    let node = self.state.upsert_node(node);
+                    if let Some(db) = &self.db {
+                        let _ = db.upsert_node(&node);
+                    }
+                    self.emit(CoreEvent::Node(Box::new(node)));
+                }
+            }
+            Some(admin_message::PayloadVariant::GetDeviceMetadataResponse(metadata)) => {
+                self.on_metadata(metadata);
+            }
+            Some(admin_message::PayloadVariant::GetChannelResponse(channel)) => {
+                self.on_channel(channel);
+            }
+            Some(admin_message::PayloadVariant::GetConfigResponse(config)) => {
+                self.on_config(config);
+            }
+            Some(admin_message::PayloadVariant::GetModuleConfigResponse(config)) => {
+                self.on_module_config(config);
+            }
+            _ => {}
+        }
+    }
+
+    /// Update a known node's "heard" data (signal, hop count, timestamp).
+    pub(crate) fn touch_node(&mut self, packet: &MeshPacket) {
+        let num = packet.from;
+        if num == 0 || Some(num) == self.state.my_num() {
+            return;
+        }
+        if !self.state.nodes.contains_key(&num) {
+            return;
+        }
+        let hops_away =
+            (packet.hop_start > 0).then(|| packet.hop_start.saturating_sub(packet.hop_limit));
+        self.state.note_heard(
+            num,
+            packet.rx_snr,
+            packet.rx_rssi as i32,
+            hops_away,
+            packet.rx_time,
+        );
+        if packet.rx_rssi != 0 {
+            self.emit(CoreEvent::Rssi {
+                node_num: num,
+                rssi: packet.rx_rssi as i32,
+            });
+        }
+        if let Some(node) = self.state.nodes.get(&num).cloned() {
+            if let Some(db) = &self.db {
+                let _ = db.upsert_node(&node);
+            }
+            self.emit(CoreEvent::Node(Box::new(node)));
+        }
+    }
+}

@@ -1,0 +1,111 @@
+[package]
+name = "meshtastic"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[dependencies]
+mt-protocol = { path = "mt-protocol" }
+mt-transport = { path = "mt-transport" }
+mt-core = { path = "mt-core" }
+mt-persistence = { path = "mt-persistence" }
+
+tokio.workspace = true
+tokio-stream.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+jiff.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+bytes.workspace = true
+base64 = "0.22"
+image.workspace = true
+reqwest.workspace = true
+
+iced.workspace = true
+iced_fonts.workspace = true
+ksni.workspace = true
+notify-rust.workspace = true
+meshtastic_protobufs.workspace = true
+
+[workspace]
+members = ["mt-protocol", "mt-transport", "mt-persistence", "mt-core"]
+default-members = ["."]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.dependencies]
+# Internal crates
+mt-protocol = { path = "mt-protocol" }
+mt-transport = { path = "mt-transport" }
+mt-persistence = { path = "mt-persistence" }
+mt-core = { path = "mt-core" }
+
+# Protocol
+meshtastic_protobufs = "2.7.8"
+# NOTE: keep prost in lockstep with `meshtastic_protobufs`; its generated
+# types implement prost 0.13's `Message`, so upgrading standalone would
+# split the trait. Revisit when the protobufs crate moves to 0.14.
+prost = "0.13"
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "fs", "signal", "process"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Errors & logging
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utils
+uuid = { version = "1", features = ["v4"] }
+jiff = "0.2"
+rand = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "7"
+bytes = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Persistence
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+# Transports
+btleplug = "0.13"
+tokio-serial = "5.5"
+serialport = "4.10"
+mdns-sd = "0.21"
+
+# HTTP, used only for the optional online map tile layer (OpenStreetMap).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# Desktop integration
+ksni = "0.3"
+notify-rust = "4.18"
+# D-Bus, used to drive BlueZ pairing. `ksni` already pulls this in with the
+# tokio backend, so this adds no new crates.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+# UI
+iced = { version = "0.14", features = ["tokio", "svg", "qr_code", "image", "markdown", "canvas", "lazy", "advanced"] }
+iced_fonts = { version = "0.3", features = ["lucide"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

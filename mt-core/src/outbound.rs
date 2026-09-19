@@ -1,0 +1,245 @@
+//! Outbound messaging: building text frames, tracking acknowledgements and
+//! retransmitting queued messages after a reconnect.
+
+use meshtastic_protobufs::meshtastic::{
+    Data, MeshPacket, PortNum, QueueStatus, Routing, mesh_packet, routing, to_radio,
+};
+use mt_persistence::{MessageRecord, MessageStatus, now_unix};
+use mt_protocol::builders::{self, TextMessage};
+use mt_protocol::constants::BROADCAST_ADDR;
+use prost::Message as _;
+
+use crate::events::CoreEvent;
+use crate::state::OutboundMessage;
+use crate::supervisor::Supervisor;
+use crate::{CoreError, Result};
+
+impl Supervisor {
+    /// Compose, persist and (when connected) transmit a text message.
+    pub(crate) async fn send_text(
+        &mut self,
+        text: String,
+        channel: u32,
+        to: Option<u32>,
+        reply_id: Option<u32>,
+    ) -> Result<()> {
+        let my_num = self.state.my_num().ok_or(CoreError::NotConnected)?;
+        let dest = to.unwrap_or(BROADCAST_ADDR);
+
+        let template = match reply_id {
+            Some(rid) => TextMessage::reaction(dest, channel, text.clone(), rid),
+            None if dest == BROADCAST_ADDR => TextMessage::broadcast(channel, text.clone()),
+            None => TextMessage::direct(dest, text.clone()),
+        };
+        let mut to_radio = builders::text_message(template);
+        let packet = match &mut to_radio.payload_variant {
+            Some(to_radio::PayloadVariant::Packet(packet)) => {
+                // The firmware also fills this in, but stamping it now keeps
+                // the persisted row consistent with the peer-thread query.
+                packet.from = my_num;
+                packet.clone()
+            }
+            _ => return Err(CoreError::Invalid("text builder produced no packet".into())),
+        };
+
+        let sent_at = now_unix();
+        if let Some(db) = &self.db {
+            db.insert_message(&packet, true, MessageStatus::Queued, Some(sent_at))
+                .map_err(CoreError::Persistence)?;
+        }
+        self.state.track_outbound(OutboundMessage {
+            packet_id: packet.id,
+            want_ack: packet.want_ack,
+            sent_at,
+            status: MessageStatus::Queued,
+        });
+        self.emit_stored_message(packet.id, true);
+
+        if self.handshake_complete {
+            self.send_to_radio(to_radio).await?;
+        }
+        Ok(())
+    }
+
+    /// Re-emit a stored message record to subscribers.
+    pub(crate) fn emit_stored_message(&self, packet_id: u32, outgoing: bool) {
+        if let Some(db) = &self.db {
+            match db.find_message(packet_id, outgoing) {
+                Ok(Some(record)) => self.emit(CoreEvent::Message(Box::new(record))),
+                Ok(None) => {}
+                Err(err) => self.emit(CoreEvent::Error(format!("reading message failed: {err}"))),
+            }
+        }
+    }
+
+    /// Handle a `QueueStatus` frame: it tells us a packet id was accepted
+    /// by the radio, which moves unacknowledged messages to `Enroute`.
+    pub(crate) fn handle_queue_status(&mut self, status: QueueStatus) {
+        self.emit(CoreEvent::QueueStatus(Box::new(status.clone())));
+        let packet_id = status.mesh_packet_id;
+        let Some(tracked) = self.state.outbound.get(&packet_id) else {
+            return;
+        };
+        let next = if tracked.want_ack {
+            MessageStatus::Enroute
+        } else {
+            MessageStatus::Delivered
+        };
+        self.update_status(packet_id, true, next, None);
+    }
+
+    /// Handle a routing report for one of our packets.
+    pub(crate) fn handle_routing(&mut self, data: &Data) {
+        let request_id = data.request_id;
+        if !self.state.outbound.contains_key(&request_id) {
+            return;
+        }
+        let routing = match Routing::decode(data.payload.as_slice()) {
+            Ok(routing) => routing,
+            Err(_) => return,
+        };
+        let (status, error) = match routing.variant {
+            Some(routing::Variant::ErrorReason(code)) => {
+                let reason = routing::Error::try_from(code).unwrap_or(routing::Error::None);
+                if reason == routing::Error::None {
+                    (MessageStatus::Delivered, None)
+                } else {
+                    (MessageStatus::Failed, Some(format!("{:?}", reason)))
+                }
+            }
+            // Route discovery shares the routing port; not a delivery report.
+            Some(routing::Variant::RouteRequest(_)) | Some(routing::Variant::RouteReply(_)) => {
+                return;
+            }
+            _ => (MessageStatus::Delivered, None),
+        };
+        self.update_status(request_id, true, status, error);
+    }
+
+    /// Move an outgoing message to `status`, persisting and announcing it.
+    pub(crate) fn update_status(
+        &mut self,
+        packet_id: u32,
+        outgoing: bool,
+        status: MessageStatus,
+        error: Option<String>,
+    ) {
+        if !self.state.outbound.contains_key(&packet_id) {
+            return;
+        }
+        self.state.set_outbound_status(packet_id, status);
+        if let Some(db) = &self.db {
+            let _ = db.mark_message_status(packet_id, outgoing, status, error.as_deref());
+        }
+        self.emit(CoreEvent::MessageStatus {
+            packet_id,
+            outgoing,
+            status,
+            error,
+        });
+        if status.is_terminal() {
+            self.state.outbound.remove(&packet_id);
+        }
+    }
+
+    /// Fail messages that have waited too long for an acknowledgement.
+    pub(crate) fn sweep_message_timeouts(&mut self) {
+        let timeout = self.cfg.message_timeout.as_secs() as i64;
+        let now = now_unix();
+        let expired: Vec<u32> = self
+            .state
+            .outbound
+            .values()
+            .filter(|msg| {
+                msg.want_ack
+                    && msg.status == MessageStatus::Enroute
+                    && now.saturating_sub(msg.sent_at) > timeout
+            })
+            .map(|msg| msg.packet_id)
+            .collect();
+        for packet_id in expired {
+            self.update_status(
+                packet_id,
+                true,
+                MessageStatus::Failed,
+                Some("no acknowledgement".into()),
+            );
+        }
+    }
+
+    /// Return in-flight messages to `Queued` when the link drops, so the
+    /// next handshake resends them.
+    pub(crate) fn requeue_inflight(&mut self) {
+        let in_flight: Vec<u32> = self
+            .state
+            .outbound
+            .values()
+            .filter(|msg| !msg.status.is_terminal())
+            .map(|msg| msg.packet_id)
+            .collect();
+        if let Some(db) = &self.db {
+            let _ = db.requeue_inflight();
+        }
+        self.state.outbound.clear();
+        for packet_id in in_flight {
+            self.emit(CoreEvent::MessageStatus {
+                packet_id,
+                outgoing: true,
+                status: MessageStatus::Queued,
+                error: None,
+            });
+        }
+    }
+
+    /// Retransmit messages left queued in the database (after connecting,
+    /// or following a reconnect).
+    pub(crate) async fn resend_pending(&mut self) {
+        let Some(db) = self.db.clone() else {
+            return;
+        };
+        let pending = match db.pending_outgoing() {
+            Ok(pending) => pending,
+            Err(err) => {
+                self.emit(CoreEvent::Error(format!(
+                    "reading pending messages failed: {err}"
+                )));
+                return;
+            }
+        };
+        let my_num = self.state.my_num().unwrap_or(0);
+
+        for record in pending {
+            let packet = match db.find_message_packet(record.packet_id, true) {
+                Ok(Some(packet)) => packet,
+                _ => rebuild_text_packet(&record, my_num),
+            };
+            self.state.track_outbound(OutboundMessage {
+                packet_id: record.packet_id,
+                want_ack: record.want_ack,
+                sent_at: now_unix(),
+                status: MessageStatus::Queued,
+            });
+            let _ = self.send_to_radio(builders::packet(packet)).await;
+            self.emit_stored_message(record.packet_id, true);
+        }
+    }
+}
+
+/// Rebuild a text packet when the original blob is unavailable.
+fn rebuild_text_packet(record: &MessageRecord, my_num: u32) -> MeshPacket {
+    MeshPacket {
+        from: my_num,
+        to: record.to,
+        channel: record.channel,
+        id: record.packet_id,
+        want_ack: record.want_ack,
+        hop_limit: mt_protocol::constants::DEFAULT_HOP_LIMIT,
+        payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
+            portnum: PortNum::TextMessageApp as i32,
+            payload: record.text.as_bytes().to_vec(),
+            reply_id: record.reply_id,
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+}

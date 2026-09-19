@@ -1,0 +1,15 @@
+[package]
+name = "mt-protocol"
+description = "Meshtastic wire protocol: framing, constants and message builders"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+uuid.workspace = true
+base64 = "0.22"
+meshtastic_protobufs.workspace = true
+prost.workspace = true
+thiserror.workspace = true
+
