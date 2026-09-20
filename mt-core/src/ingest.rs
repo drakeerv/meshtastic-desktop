@@ -116,7 +116,7 @@ impl Supervisor {
 
         match PortNum::try_from(data.portnum).unwrap_or(PortNum::UnknownApp) {
             PortNum::TextMessageApp | PortNum::AlertApp => self.on_text_packet(&packet, &data),
-            PortNum::RoutingApp => self.handle_routing(&data),
+            PortNum::RoutingApp => self.handle_routing(packet.from, &data),
             PortNum::PositionApp => self.on_position_packet(&packet, &data),
             PortNum::TelemetryApp => self.on_telemetry_packet(&packet, &data),
             PortNum::NodeinfoApp => self.on_nodeinfo_packet(&packet, &data),

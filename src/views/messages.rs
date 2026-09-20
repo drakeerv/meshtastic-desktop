@@ -582,7 +582,8 @@ fn message_bubble<'a>(app: &'a App, record: &'a MessageRecord) -> Element<'a, Me
 
 fn status_color(status: MessageStatus) -> Color {
     match status {
-        MessageStatus::Delivered => theme::primary(),
+        MessageStatus::Received => theme::primary(),
+        MessageStatus::Delivered => theme::primary_dim(),
         MessageStatus::Enroute => theme::warning(),
         MessageStatus::Queued => theme::text_faint(),
         MessageStatus::Failed => theme::danger(),
@@ -592,7 +593,8 @@ fn status_color(status: MessageStatus) -> Color {
 fn status_mark(status: MessageStatus) -> Element<'static, Message> {
     let color = status_color(status);
     match status {
-        MessageStatus::Delivered => lucide::check_check().size(13).color(color).into(),
+        MessageStatus::Received => lucide::check_check().size(13).color(color).into(),
+        MessageStatus::Delivered => lucide::check().size(13).color(color).into(),
         MessageStatus::Enroute => lucide::loader().size(13).color(color).into(),
         MessageStatus::Queued => lucide::clock_three().size(12).color(color).into(),
         MessageStatus::Failed => lucide::circle_alert().size(13).color(color).into(),

@@ -265,7 +265,10 @@ pub fn status_label(status: MessageStatus) -> &'static str {
     match status {
         MessageStatus::Queued => "queued",
         MessageStatus::Enroute => "sending",
-        MessageStatus::Delivered => "delivered",
+        // An implicit ACK only proves a neighbour rebroadcast the packet.
+        MessageStatus::Delivered => "in mesh",
+        // The destination itself acknowledged.
+        MessageStatus::Received => "delivered",
         MessageStatus::Failed => "failed",
     }
 }

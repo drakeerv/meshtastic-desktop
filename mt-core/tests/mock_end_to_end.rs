@@ -96,8 +96,10 @@ async fn mock_handshake_ingest_and_messaging() {
         handshake.node_names
     );
 
-    // A direct message is acked by the peer it was addressed to; hearing
-    // that ack must refresh the peer's last-heard time without a reconnect.
+    // The mock ACKs a direct message twice: first an implicit (mesh) ACK
+    // from the local node when a neighbour rebroadcasts it, then the
+    // destination's real ACK. Only the latter may count as delivered, and
+    // hearing the destination's ACK must refresh its last-heard time.
     let dm_target = handshake
         .node_nums
         .iter()
@@ -112,22 +114,41 @@ async fn mock_handshake_ingest_and_messaging() {
     })
     .await
     .unwrap();
-    let heard = timeout(Duration::from_secs(2), async {
+    let (statuses, heard) = timeout(Duration::from_secs(5), async {
+        let mut statuses = Vec::new();
+        let mut heard = None;
         loop {
             match events.recv().await {
                 Ok(CoreEvent::Node(node)) if node.num == dm_target && node.last_heard > 0 => {
-                    return node.last_heard;
+                    heard = Some(node.last_heard);
+                }
+                Ok(CoreEvent::MessageStatus { status, .. })
+                    if matches!(status, MessageStatus::Delivered | MessageStatus::Received) =>
+                {
+                    statuses.push(status);
                 }
                 Ok(_) => {}
                 Err(RecvError::Lagged(_)) => {}
                 Err(RecvError::Closed) => panic!("core event stream closed"),
             }
+            if statuses.last() == Some(&MessageStatus::Received)
+                && let Some(heard) = heard
+            {
+                break (statuses, heard);
+            }
         }
     })
-    .await;
+    .await
+    .expect("direct message was never acknowledged by the destination");
+
+    assert_eq!(
+        statuses,
+        vec![MessageStatus::Delivered, MessageStatus::Received],
+        "mesh ACK first, destination ACK upgrades the status"
+    );
     assert!(
-        heard.is_ok(),
-        "direct-message ack should refresh the peer's last heard"
+        heard > 0,
+        "destination ACK should refresh the peer's last heard"
     );
 
     // Send a channel message; the mock answers with a routing ack.

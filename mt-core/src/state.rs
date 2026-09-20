@@ -15,6 +15,9 @@ use mt_persistence::MessageStatus;
 #[derive(Debug, Clone)]
 pub struct OutboundMessage {
     pub packet_id: u32,
+    /// Destination node number; used to tell a destination ACK (target
+    /// received the packet) from a mesh-level implicit ACK.
+    pub to: u32,
     /// Whether a routing acknowledgement is expected.
     pub want_ack: bool,
     /// Unix seconds the message was handed to the radio.

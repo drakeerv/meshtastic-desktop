@@ -17,8 +17,12 @@ pub enum MessageStatus {
     Queued,
     /// Handed to the radio / seen in the device queue.
     Enroute,
-    /// An acknowledgement arrived.
+    /// The mesh acknowledged the packet (a relayer rebroadcast it), but the
+    /// destination has not confirmed receipt. Firmware calls this an
+    /// "implicit ACK" and sends it from our own node number.
     Delivered,
+    /// The destination confirmed receipt with a real routing ACK.
+    Received,
     /// Failed to deliver (no route, timeout, NAK, ...).
     Failed,
 }
@@ -29,6 +33,7 @@ impl MessageStatus {
             MessageStatus::Queued => "queued",
             MessageStatus::Enroute => "enroute",
             MessageStatus::Delivered => "delivered",
+            MessageStatus::Received => "received",
             MessageStatus::Failed => "failed",
         }
     }
@@ -40,13 +45,17 @@ impl MessageStatus {
             "queued" => MessageStatus::Queued,
             "enroute" => MessageStatus::Enroute,
             "delivered" => MessageStatus::Delivered,
+            "received" => MessageStatus::Received,
             _ => MessageStatus::Failed,
         }
     }
 
     /// Whether no further status transition is expected.
+    ///
+    /// `Delivered` is not terminal: a real ACK from the destination can still
+    /// upgrade it to `Received`.
     pub fn is_terminal(self) -> bool {
-        matches!(self, MessageStatus::Delivered | MessageStatus::Failed)
+        matches!(self, MessageStatus::Received | MessageStatus::Failed)
     }
 }
 
@@ -480,6 +489,32 @@ mod tests {
         assert_eq!(msgs[0].text, "hello mesh");
         assert!(msgs[0].outgoing);
         assert_eq!(msgs[0].status, MessageStatus::Delivered);
+
+        // The destination's real ACK upgrades a mesh ACK.
+        db.mark_message_status(10, true, MessageStatus::Received, None)
+            .unwrap();
+        let msgs = db.list_messages(&MessageQuery::channel(0, 50)).unwrap();
+        assert_eq!(msgs[0].status, MessageStatus::Received);
+    }
+
+    #[test]
+    fn status_strings_round_trip() {
+        for status in [
+            MessageStatus::Queued,
+            MessageStatus::Enroute,
+            MessageStatus::Delivered,
+            MessageStatus::Received,
+            MessageStatus::Failed,
+        ] {
+            assert_eq!(MessageStatus::parse(status.as_str()), status);
+        }
+        assert!(
+            !MessageStatus::Delivered.is_terminal(),
+            "a destination ACK can still upgrade a mesh ACK"
+        );
+        assert!(MessageStatus::Received.is_terminal());
+        assert!(MessageStatus::Failed.is_terminal());
+        assert!(!MessageStatus::Enroute.is_terminal());
     }
 
     #[test]

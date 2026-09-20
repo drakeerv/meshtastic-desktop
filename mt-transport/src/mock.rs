@@ -285,6 +285,28 @@ fn text_packet(from: u32, to: u32, channel: u32, text: &str) -> MeshPacket {
     }
 }
 
+/// A routing report ("ACK") for the packet `request_id`.
+fn routing_ack(from: u32, request_id: u32, channel: u32) -> MeshPacket {
+    MeshPacket {
+        from,
+        to: 0, // to the phone/client
+        channel,
+        rx_time: now_unix(),
+        rx_snr: -9.0,
+        hop_limit: 3,
+        priority: 10,
+        payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
+            portnum: meshtastic_protobufs::meshtastic::PortNum::RoutingApp as i32,
+            request_id,
+            payload: encode(&Routing {
+                variant: Some(routing::Variant::ErrorReason(routing::Error::None as i32)),
+            }),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+}
+
 pub(crate) async fn run(
     name: &str,
     mut cmd_rx: mpsc::Receiver<TransportCommand>,
@@ -465,40 +487,33 @@ async fn handle_mesh_packet(
 
         match port {
             PortNum::TextMessageApp => {
-                // Routing ack after a short delay. Real firmware acks a
-                // direct message from the destination node; only channel
-                // broadcasts are acked by the local node. This mirrors the
-                // official clients' test mocks and is what lets the sender
-                // refresh the peer's last-heard time.
+                // Real firmware sends two kinds of "no error" routing report
+                // for a direct message: an implicit ACK from the local node
+                // when a neighbour rebroadcasts the packet (so the message
+                // reached the mesh, but not necessarily the destination),
+                // then the destination's own ACK. Channel broadcasts only
+                // ever get the local implicit ACK.
                 let ack_id = p.id;
-                let ack_from = if p.to == BROADCAST_ADDR {
-                    MY_NODE_NUM
-                } else {
-                    p.to
-                };
+                let is_direct = p.to != BROADCAST_ADDR;
+                let destination = p.to;
+                let channel = p.channel;
                 let evt_tx = evt_tx.clone();
                 tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(1_500)).await;
+                    if is_direct {
+                        tokio::time::sleep(Duration::from_millis(700)).await;
+                        let _ = evt_tx
+                            .send(TransportEvent::FromRadio(packet_to_from_radio(
+                                routing_ack(MY_NODE_NUM, ack_id, channel),
+                            )))
+                            .await;
+                    }
+
+                    let ack_from = if is_direct { destination } else { MY_NODE_NUM };
+                    tokio::time::sleep(Duration::from_millis(if is_direct { 800 } else { 1_500 }))
+                        .await;
                     let _ = evt_tx
                         .send(TransportEvent::FromRadio(packet_to_from_radio(
-                            MeshPacket {
-                                from: ack_from,
-                                to: 0, // to the phone/client
-                                id: 0,
-                                rx_time: now_unix(),
-                                channel: p.channel,
-                                payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
-                                    portnum: PortNum::RoutingApp as i32,
-                                    request_id: ack_id,
-                                    payload: encode(&Routing {
-                                        variant: Some(routing::Variant::ErrorReason(
-                                            routing::Error::None as i32,
-                                        )),
-                                    }),
-                                    ..Default::default()
-                                })),
-                                ..Default::default()
-                            },
+                            routing_ack(ack_from, ack_id, channel),
                         )))
                         .await;
 
@@ -508,7 +523,7 @@ async fn handle_mesh_packet(
                     tokio::time::sleep(Duration::from_millis(2_000)).await;
                     let _ = evt_tx
                         .send(TransportEvent::FromRadio(packet_to_from_radio(
-                            text_packet(node.num, BROADCAST_ADDR, p.channel, "roger that 👍"),
+                            text_packet(node.num, BROADCAST_ADDR, channel, "roger that 👍"),
                         )))
                         .await;
                 });
