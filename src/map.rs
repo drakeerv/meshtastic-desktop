@@ -12,9 +12,13 @@ use iced::{Color, Point, Rectangle, Size};
 use crate::app::Message;
 use crate::tiles::{self, TileCache};
 
+/// The deepest zoom the canvas allows. OpenStreetMap serves tiles up to zoom
+/// 19, so past that the imagery is overzoomed (scaled up) rather than fetched.
+const MAX_ZOOM: u8 = 21;
+
 /// Lowest and highest pixels-per-radian the map allows.
 const MIN_SCALE: f32 = 0.01;
-const MAX_SCALE: f32 = 80_000.0;
+const MAX_SCALE: f32 = 128.0 * (1u32 << MAX_ZOOM) as f32 / std::f32::consts::PI;
 
 /// Latitude clamp for the Web Mercator projection.
 const MAX_MERCATOR_LAT: f64 = 85.051_128_78;
