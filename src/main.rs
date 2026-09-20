@@ -18,6 +18,7 @@ mod security;
 mod settings;
 mod theme;
 mod tiles;
+mod tray;
 mod views;
 mod widgets;
 
@@ -57,7 +58,7 @@ fn main() -> iced::Result {
     let discovery_for_boot = discovery.clone();
     let settings_for_boot = settings.clone();
 
-    iced::application(
+    iced::daemon(
         move || {
             let (mut app, task) = App::new(
                 core_for_boot.clone(),
@@ -68,20 +69,39 @@ fn main() -> iced::Result {
             (app, task)
         },
         App::update,
-        App::view,
+        view,
     )
     .font(iced_fonts::LUCIDE_FONT_BYTES)
-    .title(|_: &App| "Meshtastic".to_string())
-    .theme(|app: &App| app.theme())
+    .title(|_: &App, _window: iced::window::Id| "Meshtastic".to_string())
+    .theme(|app: &App, _window: iced::window::Id| app.theme())
     .subscription(|app: &App| app.subscription())
-    .window(iced::window::Settings {
-        size: iced::Size::new(1180.0, 780.0),
-        icon: window_icon(),
-        platform_specific: platform_specific(),
-        ..Default::default()
-    })
     .antialiasing(true)
     .run()
+}
+
+/// The daemon's view function.
+///
+/// A named function is needed here so it stays generic over the borrow
+/// lifetime; an inline closure is inferred with a single concrete lifetime,
+/// which the `ViewFn` bound rejects.
+fn view(app: &App, _window: iced::window::Id) -> iced::Element<'_, app::Message> {
+    app.view()
+}
+
+/// The main window's settings.
+///
+/// The app runs as a daemon (no default window) so it can keep living in the
+/// tray, so the window is opened, and reopened from the tray, with these.
+pub fn window_settings() -> iced::window::Settings {
+    iced::window::Settings {
+        size: iced::Size::new(1180.0, 780.0),
+        icon: window_icon(),
+        // Close requests are the app's to handle: with "close to tray" on we
+        // close the window and stay in the tray, otherwise we exit explicitly.
+        exit_on_close_request: false,
+        platform_specific: platform_specific(),
+        ..Default::default()
+    }
 }
 
 /// The application id that compositors (KDE/GNOME) use to associate the

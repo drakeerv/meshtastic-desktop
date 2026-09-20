@@ -22,6 +22,7 @@ use crate::config_editor::{ChannelEditor, Editor, Section, SectionValue};
 use crate::map::{MapNode, MapView};
 use crate::settings::{AppSettings, ThemePref};
 use crate::tiles::{self, TileKey};
+use crate::tray::{TrayEvent, TrayHandle, TrayState};
 use crate::views;
 use crate::{format, theme};
 
@@ -274,6 +275,16 @@ pub enum Message {
     ManualLatChanged(String),
     ManualLonChanged(String),
     SetManualPosition,
+
+    // tray / window
+    /// An event raised by the system tray.
+    Tray(TrayEvent),
+    /// The main window id, resolved once at startup.
+    WindowId(Option<window::Id>),
+    /// The window manager asked to close a window.
+    CloseRequested(window::Id),
+    /// Hide to the tray instead of quitting when the window is closed.
+    ToggleCloseToTray(bool),
     OwnerLongChanged(String),
     OwnerShortChanged(String),
     SaveOwner,
@@ -371,6 +382,13 @@ pub struct App {
 
     pub now: i64,
     pub system_mode: Option<iced::theme::Mode>,
+
+    // tray / window
+    /// The system tray, if it could be started.
+    pub tray: TrayHandle,
+    tray_state: TrayState,
+    /// The main window's id, or `None` while it is hidden in the tray.
+    window_id: Option<window::Id>,
 }
 
 impl App {
@@ -386,6 +404,8 @@ impl App {
             Tab::Connect
         };
         let online_tiles = settings.online_tiles;
+        // A daemon starts with no window; open the main one here.
+        let (window_id, open_window) = iced::window::open(crate::window_settings());
         let app = Self {
             bridge: Bridge::new(core, discovery),
             settings,
@@ -437,8 +457,15 @@ impl App {
             manual_lon: String::new(),
             now: mt_persistence::now_unix(),
             system_mode: None,
+            tray: TrayHandle::spawn(),
+            tray_state: TrayState::default(),
+            window_id: Some(window_id),
         };
-        (app, iced::system::theme().map(Message::SystemTheme))
+        let boot = Task::batch([
+            iced::system::theme().map(Message::SystemTheme),
+            open_window.map(|id| Message::WindowId(Some(id))),
+        ]);
+        (app, boot)
     }
 
     /// Dispatch an initial auto-connect if the user asked for one.
@@ -751,14 +778,90 @@ impl App {
         ));
     }
 
+    // tray
+
+    /// Handle an event raised by the system tray.
+    fn handle_tray(&mut self, event: TrayEvent) -> Task<Message> {
+        match event {
+            TrayEvent::Toggle => self.toggle_window(),
+            TrayEvent::Quit => iced::exit(),
+        }
+    }
+
+    /// Show or hide the main window, as asked by the tray.
+    ///
+    /// The app runs as an iced daemon, so hiding is simply closing the window
+    /// (the process stays alive) and showing is opening a fresh one. This is
+    /// the only approach that works on Wayland, where a window cannot be
+    /// hidden or un-minimized programmatically.
+    fn toggle_window(&mut self) -> Task<Message> {
+        match self.window_id {
+            Some(id) => {
+                self.window_id = None;
+                iced::window::close(id)
+            }
+            None => self.open_window(),
+        }
+    }
+
+    /// Open (or reopen) the main window and remember its id.
+    fn open_window(&mut self) -> Task<Message> {
+        let (id, open) = iced::window::open(crate::window_settings());
+        self.window_id = Some(id);
+        open.map(|id| Message::WindowId(Some(id)))
+    }
+
+    /// Push the connection and node status to the tray, if it changed.
+    fn sync_tray(&mut self) {
+        let connected = self.is_connected();
+        let status = if connected {
+            "Connected"
+        } else {
+            "Disconnected"
+        }
+        .to_string();
+
+        let mut parts = Vec::new();
+        if connected && !self.owner_short.is_empty() {
+            parts.push(self.owner_short.clone());
+        }
+        if !self.nodes.is_empty() {
+            parts.push(format!("{} nodes", self.nodes.len()));
+        }
+        if connected {
+            parts.push(format!("{} channels", self.active_channels().len()));
+            if let Some(firmware) = self
+                .metadata
+                .as_ref()
+                .map(|metadata| metadata.firmware_version.as_str())
+                .filter(|firmware| !firmware.is_empty())
+            {
+                parts.push(format!("fw {firmware}"));
+            }
+        }
+
+        let state = TrayState {
+            status,
+            stats: parts.join(" · "),
+        };
+        if state != self.tray_state {
+            self.tray_state = state.clone();
+            self.tray.update(state);
+        }
+    }
+
     // update
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Core(event) => self.handle_core_event(event),
+            Message::Core(event) => {
+                self.handle_core_event(event);
+                self.sync_tray();
+            }
             Message::Discovery(event) => self.handle_discovery_event(event),
             Message::Tick => {
                 self.now = mt_persistence::now_unix();
+                self.sync_tray();
                 // Keep the online tile layer topped up as the map moves or the
                 // local node reports a new position.
                 return self.ensure_tiles();
@@ -1055,6 +1158,22 @@ impl App {
             Message::ManualLatChanged(value) => self.manual_lat = value,
             Message::ManualLonChanged(value) => self.manual_lon = value,
             Message::SetManualPosition => self.set_manual_position(),
+
+            Message::Tray(event) => return self.handle_tray(event),
+            Message::WindowId(id) => self.window_id = id,
+            Message::CloseRequested(id) => {
+                if self.window_id == Some(id) {
+                    self.window_id = None;
+                }
+                if self.settings.close_to_tray {
+                    return iced::window::close(id);
+                }
+                return iced::exit();
+            }
+            Message::ToggleCloseToTray(value) => {
+                self.settings.close_to_tray = value;
+                self.settings.save();
+            }
             Message::OwnerLongChanged(value) => self.owner_long = value,
             Message::OwnerShortChanged(value) => self.owner_short = value,
             Message::SaveOwner => {
@@ -1594,7 +1713,12 @@ impl App {
         } else {
             record.text.clone()
         };
-        notification.summary(&name).body(&body);
+        notification
+            .appname("Meshtastic Desktop")
+            .summary(&name)
+            .body(&body)
+            .icon(crate::APP_ID)
+            .hint(notify_rust::Hint::DesktopEntry(crate::APP_ID.to_string()));
         let _ = notification.show();
     }
 
@@ -1643,8 +1767,10 @@ impl App {
     pub fn subscription(&self) -> Subscription<Message> {
         let mut subscriptions = vec![
             self.bridge.subscription(),
+            self.tray.subscription(),
             iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::Tick),
             iced::system::theme_changes().map(Message::SystemTheme),
+            iced::window::close_requests().map(Message::CloseRequested),
         ];
         // When "send on Enter" is off, the compose box has no submit handler,
         // so listen for Ctrl+Enter ourselves while the Messages tab is open.

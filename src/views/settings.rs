@@ -222,6 +222,13 @@ fn app_page(app: &App) -> Element<'_, Message> {
                     .on_toggle(Message::ToggleScanOnStart)
                     .into(),
             ),
+            setting_row(
+                "Close to tray",
+                "Keep running in the system tray when the window is closed.",
+                checkbox(app.settings.close_to_tray)
+                    .on_toggle(Message::ToggleCloseToTray)
+                    .into(),
+            ),
         ]
         .spacing(12)
         .into(),

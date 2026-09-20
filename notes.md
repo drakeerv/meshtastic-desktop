@@ -12,8 +12,9 @@ Roadmap ideas (roughly priority order):
    AppImage + .deb, AUR PKGBUILD, and a tagged release workflow.
 3. Logging overhaul.
    Structured tracing, level filter, copy/export from the Logs panel.
-4. Tray icon + close-to-tray.
-   ksni is already a dependency; make it a real background process.
+4. Tray icon + close-to-tray. (done)
+   ksni system tray with show/hide and quit, close-to-tray, notifications
+   attributed to the app icon.
 5. Host integration. (done)
    Device clock on connect, "Fill from host" timezone, GeoClue host location.
 6. Message UX.

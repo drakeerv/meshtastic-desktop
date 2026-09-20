@@ -54,6 +54,13 @@ desktop app.
   lookup, and sets the result as the device's fixed position. Coordinates can
   also be entered by hand.
 
+**Desktop integration**
+
+- A system tray icon (StatusNotifierItem) with a live status tooltip, a
+  show/hide action and quit.
+- Close-to-tray so the client keeps running in the background.
+- Desktop notifications for incoming messages, attributed to the app icon.
+
 ## Building
 
 Prerequisites:

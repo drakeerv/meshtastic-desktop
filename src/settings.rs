@@ -55,6 +55,8 @@ pub struct AppSettings {
     pub online_tiles: bool,
     /// Allow the IP-based location fallback when GeoClue and gpsd are absent.
     pub use_ip_location: bool,
+    /// Hide to the system tray instead of quitting when the window is closed.
+    pub close_to_tray: bool,
 }
 
 impl Default for AppSettings {
@@ -69,6 +71,7 @@ impl Default for AppSettings {
             imperial: false,
             online_tiles: false,
             use_ip_location: false,
+            close_to_tray: true,
         }
     }
 }
