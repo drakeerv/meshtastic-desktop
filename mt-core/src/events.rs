@@ -98,10 +98,12 @@ pub enum CoreEvent {
         node_num: u32,
         telemetry: Box<Telemetry>,
     },
-    /// A traceroute response.
+    /// A traceroute response. `route` and `route_back` include both
+    /// endpoints (origin and target); SNR list index `i` labels the link
+    /// between hop `i` and hop `i + 1`.
     Traceroute {
         packet_id: u32,
-        from: u32,
+        target: u32,
         route: Vec<u32>,
         snr_towards: Vec<i32>,
         route_back: Vec<u32>,

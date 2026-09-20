@@ -20,7 +20,7 @@ use mt_transport::DiscoveryHandle;
 use crate::bridge::Bridge;
 use crate::config_editor::{ChannelEditor, Editor, Section, SectionValue};
 use crate::map::{MapNode, MapView};
-use crate::settings::{AppSettings, ThemePref};
+use crate::settings::{AppSettings, NodeSort, ThemePref};
 use crate::tiles::{self, TileKey};
 use crate::tray::{TrayEvent, TrayHandle, TrayState};
 use crate::views;
@@ -146,15 +146,27 @@ impl ConnectTab {
 }
 
 /// Latest traceroute result, kept for the node detail panel.
+///
+/// `route`/`route_back` include both endpoints; SNR list index `i` labels
+/// the link between hop `i` and hop `i + 1`.
 #[derive(Debug, Clone)]
 pub struct TracerouteInfo {
-    pub from: u32,
     pub route: Vec<u32>,
     pub snr_towards: Vec<i32>,
     pub route_back: Vec<u32>,
     pub snr_back: Vec<i32>,
     pub at: i64,
 }
+
+/// A traceroute request waiting for the device to answer.
+#[derive(Debug, Clone, Copy)]
+pub struct TraceroutePending {
+    pub target: u32,
+    pub at: i64,
+}
+
+/// How long to wait for a traceroute response before giving up on it.
+pub const TRACEROUTE_TIMEOUT: i64 = 30;
 
 /// A contact link rendered as a QR code, ready to display.
 pub struct ContactQr {
@@ -300,6 +312,7 @@ pub enum Message {
     ToggleSendOnEnter(bool),
     ToggleScanOnStart(bool),
     ToggleImperial(bool),
+    NodeSortChanged(NodeSort),
 
     // host integration
     /// Send this computer's timezone to the device (`DeviceConfig.tzdef`).
@@ -384,7 +397,10 @@ pub struct App {
     pub messages: Vec<MessageRecord>,
     /// Parsed Markdown for each message, kept here so the view can borrow it.
     pub markdown: HashMap<i64, markdown::Content>,
-    pub traceroute: Option<TracerouteInfo>,
+    /// Latest traceroute result per target node.
+    pub traceroutes: HashMap<u32, TracerouteInfo>,
+    /// In-flight traceroute request, if any.
+    pub traceroute_pending: Option<TraceroutePending>,
     pub editor: Option<Editor>,
     pub channel_editor: Option<ChannelEditor>,
     pub settings_page: SettingsPage,
@@ -493,7 +509,8 @@ impl App {
             latest_telemetry: HashMap::new(),
             messages: Vec::new(),
             markdown: HashMap::new(),
-            traceroute: None,
+            traceroutes: HashMap::new(),
+            traceroute_pending: None,
             editor: None,
             channel_editor: None,
             settings_page: SettingsPage::Hub,
@@ -946,11 +963,23 @@ impl App {
             })
             .collect();
         nodes.sort_by(|a, b| {
-            b.is_favorite.cmp(&a.is_favorite).then_with(|| {
-                format::node_name(a)
-                    .to_lowercase()
-                    .cmp(&format::node_name(b).to_lowercase())
-            })
+            b.is_favorite
+                .cmp(&a.is_favorite)
+                .then_with(|| match self.settings.node_sort {
+                    NodeSort::Name => format::node_name(a)
+                        .to_lowercase()
+                        .cmp(&format::node_name(b).to_lowercase()),
+                    NodeSort::LastHeard => b.last_heard.cmp(&a.last_heard).then_with(|| {
+                        format::node_name(a)
+                            .to_lowercase()
+                            .cmp(&format::node_name(b).to_lowercase())
+                    }),
+                    NodeSort::Signal => b.snr.total_cmp(&a.snr).then_with(|| {
+                        format::node_name(a)
+                            .to_lowercase()
+                            .cmp(&format::node_name(b).to_lowercase())
+                    }),
+                })
         });
         nodes
     }
@@ -970,6 +999,20 @@ impl App {
     fn prune_notices(&mut self) {
         let now = Instant::now();
         self.notices.retain(|notice| notice.expires > now);
+    }
+
+    /// Give up on a traceroute request the device never answered.
+    fn expire_traceroute_pending(&mut self) {
+        let Some(pending) = self.traceroute_pending else {
+            return;
+        };
+        if self.now.saturating_sub(pending.at) > TRACEROUTE_TIMEOUT {
+            self.traceroute_pending = None;
+            self.push_notice(format!(
+                "no traceroute response from {}",
+                self.node_name(pending.target)
+            ));
+        }
     }
 
     // map
@@ -1178,6 +1221,7 @@ impl App {
             Message::Discovery(event) => self.handle_discovery_event(event),
             Message::Tick => {
                 self.now = mt_persistence::now_unix();
+                self.expire_traceroute_pending();
                 self.sync_tray();
                 self.mark_active_conversation_read_if_viewing();
                 // Keep the online tile layer topped up as the map moves or the
@@ -1357,6 +1401,10 @@ impl App {
                     .bridge
                     .core()
                     .try_dispatch(CoreCommand::Traceroute(num));
+                self.traceroute_pending = Some(TraceroutePending {
+                    target: num,
+                    at: self.now,
+                });
                 self.push_notice(format!("traceroute to {} started", self.node_name(num)));
             }
             Message::RemoveNode(num) => {
@@ -1431,6 +1479,10 @@ impl App {
             }
             Message::ToggleImperial(value) => {
                 self.settings.imperial = value;
+                self.settings.save();
+            }
+            Message::NodeSortChanged(sort) => {
+                self.settings.node_sort = sort;
                 self.settings.save();
             }
 
@@ -1896,7 +1948,8 @@ impl App {
                     self.my_node_num = None;
                     self.my_info = None;
                     self.metadata = None;
-                    self.traceroute = None;
+                    self.traceroutes.clear();
+                    self.traceroute_pending = None;
                     self.contact_qr = None;
                     self.contact_import = None;
                     self.ble_pairing = None;
@@ -2060,21 +2113,29 @@ impl App {
                 self.latest_telemetry.insert(node_num, *telemetry);
             }
             CoreEvent::Traceroute {
-                from,
+                target,
                 route,
                 snr_towards,
                 route_back,
                 snr_back,
                 ..
             } => {
-                self.traceroute = Some(TracerouteInfo {
-                    from,
-                    route,
-                    snr_towards,
-                    route_back,
-                    snr_back,
-                    at: mt_persistence::now_unix(),
-                });
+                self.traceroutes.insert(
+                    target,
+                    TracerouteInfo {
+                        route,
+                        snr_towards,
+                        route_back,
+                        snr_back,
+                        at: mt_persistence::now_unix(),
+                    },
+                );
+                if self
+                    .traceroute_pending
+                    .is_some_and(|pending| pending.target == target)
+                {
+                    self.traceroute_pending = None;
+                }
             }
             CoreEvent::QueueStatus(_) => {}
             CoreEvent::BlePairingRequest { address } => {
@@ -2636,6 +2697,98 @@ mod tests {
 
         let _ = app.update(Message::CloseContactShare);
         assert!(app.contact_qr.is_none());
+    }
+
+    #[tokio::test]
+    async fn node_sort_preference_orders_the_list() {
+        use meshtastic_protobufs::meshtastic::{NodeInfo, User};
+
+        let core = mt_core::spawn_core(mt_core::CoreConfig::default());
+        let discovery = mt_transport::spawn_discovery();
+        let (mut app, _task) = App::new(core, discovery, AppSettings::default());
+
+        let node = |num: u32, name: &str, last_heard: u32, snr: f32, favorite: bool| NodeInfo {
+            num,
+            last_heard,
+            snr,
+            is_favorite: favorite,
+            user: Some(User {
+                id: format!("!{num:08x}"),
+                long_name: name.into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        app.nodes.insert(1, node(1, "Bravo", 300, -5.0, false));
+        app.nodes.insert(2, node(2, "Alpha", 100, -2.0, false));
+        app.nodes.insert(3, node(3, "Favorite", 1, -9.0, true));
+
+        let names = |app: &App| {
+            app.visible_nodes()
+                .iter()
+                .map(|n| format::node_name(n))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            names(&app),
+            ["Favorite", "Alpha", "Bravo"],
+            "default name sort keeps favourites on top"
+        );
+
+        app.settings.node_sort = NodeSort::LastHeard;
+        assert_eq!(
+            names(&app),
+            ["Favorite", "Bravo", "Alpha"],
+            "newest heard first, after favourites"
+        );
+
+        app.settings.node_sort = NodeSort::Signal;
+        assert_eq!(
+            names(&app),
+            ["Favorite", "Alpha", "Bravo"],
+            "strongest signal first, after favourites"
+        );
+    }
+
+    #[tokio::test]
+    async fn traceroute_results_are_kept_per_target() {
+        let core = mt_core::spawn_core(mt_core::CoreConfig::default());
+        let discovery = mt_transport::spawn_discovery();
+        let (mut app, _task) = App::new(core, discovery, AppSettings::default());
+
+        let target = 0x00AA_BBCC;
+        app.traceroute_pending = Some(TraceroutePending {
+            target,
+            at: mt_persistence::now_unix() - TRACEROUTE_TIMEOUT - 1,
+        });
+        let _ = app.update(Message::Core(CoreEvent::Traceroute {
+            packet_id: 7,
+            target,
+            route: vec![0xAAAA_0001, 0x0BAD_CAFE, target],
+            snr_towards: vec![8, -20],
+            route_back: vec![target, 0x0BAD_CAFE, 0xAAAA_0001],
+            snr_back: vec![-4, -12],
+        }));
+
+        let trace = app.traceroutes.get(&target).expect("result stored");
+        assert_eq!(trace.route.len(), 3, "endpoints are part of the route");
+        assert_eq!(trace.snr_towards, vec![8, -20]);
+        assert!(
+            app.traceroute_pending.is_none(),
+            "answering a request clears it"
+        );
+
+        // An unanswered request eventually gives up.
+        app.traceroute_pending = Some(TraceroutePending {
+            target,
+            at: mt_persistence::now_unix() - TRACEROUTE_TIMEOUT - 1,
+        });
+        let _ = app.update(Message::Tick);
+        assert!(
+            app.traceroute_pending.is_none(),
+            "stale requests must time out"
+        );
     }
 
     /// Build a key-press event for shortcut tests.

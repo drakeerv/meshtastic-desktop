@@ -369,7 +369,14 @@ impl Supervisor {
                     .await
             }
             C::Traceroute(num) => {
-                self.send_online(mt_protocol::builders::traceroute_request(num))
+                // Trace over the channel the destination was last heard on.
+                let channel = self
+                    .state
+                    .nodes
+                    .get(&num)
+                    .map(|node| node.channel)
+                    .unwrap_or(0);
+                self.send_online(mt_protocol::builders::traceroute_request(num, channel))
                     .await
             }
             C::RequestNodeList(num) => {

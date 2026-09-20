@@ -18,9 +18,9 @@ use std::time::Duration;
 
 use meshtastic_protobufs::meshtastic::{
     AdminMessage, Channel, ChannelSettings, Config, Data, DeviceMetrics, EnvironmentMetrics,
-    FromRadio, MeshPacket, ModuleConfig, MyNodeInfo, NodeInfo, Position, Routing, Telemetry,
-    ToRadio, User, admin_message, channel, config, from_radio, mesh_packet, module_config, routing,
-    telemetry,
+    FromRadio, MeshPacket, ModuleConfig, MyNodeInfo, NodeInfo, Position, RouteDiscovery, Routing,
+    Telemetry, ToRadio, User, admin_message, channel, config, from_radio, mesh_packet,
+    module_config, routing, telemetry,
 };
 use prost::Message;
 use rand::RngExt as _;
@@ -527,6 +527,47 @@ async fn handle_mesh_packet(
                         )))
                         .await;
                 });
+            }
+            PortNum::TracerouteApp => {
+                // Answer a request with a response carrying one intermediate
+                // hop, the way real firmware fills the RouteDiscovery: the
+                // endpoints themselves are not in the payload.
+                if data.want_response {
+                    let request_id = p.id;
+                    let target = p.to;
+                    let channel = p.channel;
+                    let reply_id = rand::rng().random_range(1..u32::MAX);
+                    let evt_tx = evt_tx.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        let relay = 0x0BAD_CAFE;
+                        let _ = evt_tx
+                            .send(TransportEvent::FromRadio(packet_to_from_radio(
+                                MeshPacket {
+                                    from: target,
+                                    to: MY_NODE_NUM,
+                                    channel,
+                                    id: reply_id,
+                                    rx_time: now_unix(),
+                                    payload_variant: Some(mesh_packet::PayloadVariant::Decoded(
+                                        Data {
+                                            portnum: PortNum::TracerouteApp as i32,
+                                            request_id,
+                                            payload: encode(&RouteDiscovery {
+                                                route: vec![relay],
+                                                snr_towards: vec![8, -20],
+                                                route_back: vec![relay],
+                                                snr_back: vec![-4, -12],
+                                            }),
+                                            ..Default::default()
+                                        },
+                                    )),
+                                    ..Default::default()
+                                },
+                            )))
+                            .await;
+                    });
+                }
             }
             PortNum::AdminApp => {
                 let admin = AdminMessage::decode(data.payload.as_slice()).ok();

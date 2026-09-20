@@ -35,6 +35,34 @@ impl ThemePref {
     }
 }
 
+/// How the node list is ordered (favourites always stay on top).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeSort {
+    #[default]
+    Name,
+    LastHeard,
+    Signal,
+}
+
+impl std::fmt::Display for NodeSort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+impl NodeSort {
+    pub const ALL: [NodeSort; 3] = [NodeSort::Name, NodeSort::LastHeard, NodeSort::Signal];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            NodeSort::Name => "Name",
+            NodeSort::LastHeard => "Last heard",
+            NodeSort::Signal => "Signal",
+        }
+    }
+}
+
 /// Client preferences persisted between runs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -62,6 +90,8 @@ pub struct AppSettings {
     pub share_location_devices: Vec<String>,
     /// Hide to the system tray instead of quitting when the window is closed.
     pub close_to_tray: bool,
+    /// Order of the node list.
+    pub node_sort: NodeSort,
     /// Boost contrast of borders and secondary text.
     pub high_contrast: bool,
     /// Interface scale factor applied to the whole window (1.0 is default).
@@ -90,6 +120,7 @@ impl Default for AppSettings {
             use_ip_location: false,
             share_location_devices: Vec::new(),
             close_to_tray: true,
+            node_sort: NodeSort::Name,
             high_contrast: false,
             ui_scale: 1.0,
             last_node_num: None,
@@ -163,5 +194,21 @@ mod tests {
         settings.set_shares_location("xaa", false);
         assert!(!settings.shares_location(Some("xaa")));
         assert!(settings.share_location_devices.is_empty());
+    }
+
+    #[test]
+    fn node_sort_round_trips() {
+        let mut settings = AppSettings::default();
+        assert_eq!(settings.node_sort, NodeSort::Name);
+
+        settings.node_sort = NodeSort::LastHeard;
+        let text = serde_json::to_string(&settings).unwrap();
+        assert!(text.contains("\"last_heard\""));
+        let parsed: AppSettings = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed.node_sort, NodeSort::LastHeard);
+
+        // Files written before the field existed keep the default.
+        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed.node_sort, NodeSort::Name);
     }
 }

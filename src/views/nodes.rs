@@ -1,11 +1,14 @@
 //! Nodes view: the mesh node database with per-node detail and actions.
 
-use iced::widget::{Space, button, column, container, row, scrollable, text, text_input};
+use iced::widget::{
+    Space, button, column, container, pick_list, row, scrollable, text, text_input,
+};
 use iced::{Alignment, Element, Length, Padding};
 
-use crate::app::{Message, TracerouteInfo};
+use crate::app::Message;
 use crate::format;
 use crate::icons::lucide;
+use crate::settings::NodeSort;
 use crate::theme;
 use crate::widgets;
 use meshtastic_protobufs::meshtastic::{NodeInfo, Position, User, telemetry};
@@ -43,6 +46,20 @@ fn node_list(app: &crate::app::App) -> Element<'_, Message> {
                 .style(theme::text_input_style)
                 .padding(Padding::from([9, 12]))
                 .size(13),
+            row![
+                text("Sort").size(12).color(theme::text_faint()),
+                Space::new().width(Length::Fill),
+                pick_list(
+                    NodeSort::ALL.to_vec(),
+                    Some(app.settings.node_sort),
+                    Message::NodeSortChanged,
+                )
+                .text_size(12)
+                .padding(Padding::from([5, 9]))
+                .width(Length::Fixed(130.0)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
         ]
         .spacing(10),
     )
@@ -372,9 +389,8 @@ fn node_detail(app: &crate::app::App) -> Element<'_, Message> {
     }
 
     // traceroute
-    if let Some(trace) = app.traceroute.as_ref().filter(|t| t.from == num) {
-        body = body.push(traceroute_block(trace));
-    }
+    body = body.push(widgets::divider());
+    body = body.push(traceroute_block(app, num));
 
     // actions
     body = body.push(
@@ -569,80 +585,125 @@ fn telemetry_block(
     )
 }
 
-fn traceroute_block(trace: &TracerouteInfo) -> Element<'static, Message> {
-    let hops = trace
-        .route
-        .iter()
-        .map(|n| format::node_id(*n))
-        .collect::<Vec<_>>()
-        .join("  →  ");
-    let snr = if trace.snr_towards.is_empty() {
-        "-".to_string()
-    } else {
-        trace
-            .snr_towards
-            .iter()
-            .map(|v| format!("{:.1}", *v as f64 / 4.0))
-            .collect::<Vec<_>>()
-            .join(" dB → ")
-    };
+fn traceroute_block<'a>(app: &'a crate::app::App, num: u32) -> Element<'a, Message> {
+    let pending = app
+        .traceroute_pending
+        .filter(|pending| pending.target == num);
 
-    let back = trace
-        .route_back
-        .iter()
-        .map(|n| format::node_id(*n))
-        .collect::<Vec<_>>()
-        .join("  →  ");
-    let snr_back = if trace.snr_back.is_empty() {
-        None
-    } else {
-        Some(
-            trace
-                .snr_back
-                .iter()
-                .map(|v| format!("{:.1}", *v as f64 / 4.0))
-                .collect::<Vec<_>>()
-                .join(" dB → "),
-        )
-    };
+    let mut header = row![text("TRACEROUTE").size(11).color(theme::text_faint())]
+        .spacing(6)
+        .align_y(Alignment::Center);
 
-    let mut block = column![
-        text("TRACEROUTE").size(11).color(theme::text_faint()),
-        text(if hops.is_empty() {
-            "No route".to_string()
-        } else {
-            hops
-        })
-        .size(13)
-        .color(theme::text()),
-        text(format!("SNR {snr} dB"))
-            .size(12)
+    let Some(trace) = app.traceroutes.get(&num) else {
+        return column![
+            header,
+            text(if pending.is_some() {
+                "Waiting for the device to trace the route…"
+            } else {
+                "No traceroute yet. Run one to see the route to this node."
+            })
+            .size(13)
             .color(theme::text_muted()),
-    ]
-    .spacing(4);
+        ]
+        .spacing(8)
+        .into();
+    };
 
-    if !back.is_empty() {
-        block = block.push(
-            text(format!("return  {back}"))
-                .size(12)
-                .color(theme::text_muted()),
+    if pending.is_some() {
+        header = header.push(lucide::loader().size(11).color(theme::primary()));
+        header = header.push(text("tracing again…").size(11).color(theme::text_muted()));
+    } else {
+        header = header.push(Space::new().width(Length::Fill));
+        header = header.push(
+            text(format::relative_time(trace.at as u32, app.now))
+                .size(11)
+                .color(theme::text_faint()),
         );
-        if let Some(snr_back) = snr_back {
-            block = block.push(
-                text(format!("SNR {snr_back} dB"))
-                    .size(12)
-                    .color(theme::text_muted()),
-            );
+    }
+
+    let mut block = column![header].spacing(10);
+    if trace.route.len() > 1 {
+        block = block.push(route_lines(
+            app,
+            "TOWARD DESTINATION",
+            &trace.route,
+            &trace.snr_towards,
+            num,
+        ));
+    }
+    if trace.route_back.len() > 1 {
+        block = block.push(route_lines(
+            app,
+            "BACK TO US",
+            &trace.route_back,
+            &trace.snr_back,
+            num,
+        ));
+    }
+
+    block.into()
+}
+
+/// One direction of a traceroute: hops with the SNR of each link between.
+fn route_lines<'a>(
+    app: &'a crate::app::App,
+    label: &'static str,
+    hops: &'a [u32],
+    snrs: &'a [i32],
+    target: u32,
+) -> Element<'a, Message> {
+    let mut lines = column![text(label).size(10).color(theme::text_faint())].spacing(5);
+    for (index, hop) in hops.iter().enumerate() {
+        lines = lines.push(hop_row(app, *hop, target));
+        if index + 1 < hops.len() {
+            lines = lines.push(link_snr(snrs.get(index).copied()));
         }
     }
 
-    block
-        .push(
-            text(format!("Received {}", format::clock_time(trace.at)))
-                .size(11)
-                .color(theme::text_faint()),
-        )
+    container(lines)
+        .padding(Padding {
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 4.0,
+        })
         .into()
+}
+
+fn hop_row<'a>(app: &'a crate::app::App, num: u32, target: u32) -> Element<'a, Message> {
+    let unknown = num == u32::MAX;
+    let name = if unknown {
+        "unknown hop".to_string()
+    } else {
+        app.node(num)
+            .map(format::node_name)
+            .unwrap_or_else(|| format::node_id(num))
+    };
+
+    let mut row = row![
+        lucide::circle().size(7).color(theme::primary()),
+        text(name).size(13).color(theme::text()),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    if !unknown && Some(num) == app.my_node_num {
+        row = row.push(widgets::tag("you", theme::text_muted()));
+    } else if !unknown && num == target {
+        row = row.push(widgets::tag("target", theme::primary()));
+    }
+
+    row.into()
+}
+
+/// The SNR of the link between two hops; `-128` means the device did not
+/// measure it (or the hop count did not add up).
+fn link_snr(snr: Option<i32>) -> Element<'static, Message> {
+    let label = match snr {
+        Some(value) if value > -128 => format!("⇊ {:.1} dB", value as f32 / 4.0),
+        _ => "⇊ ? dB".to_string(),
+    };
+    text(label).size(11).color(theme::text_muted()).into()
 }
 
 fn format_uptime(seconds: u32) -> String {

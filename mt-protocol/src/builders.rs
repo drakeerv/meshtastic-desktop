@@ -328,17 +328,23 @@ pub fn position_request(dest: u32) -> ToRadio {
 }
 
 /// Requests a traceroute to a node.
-pub fn traceroute_request(dest: u32) -> ToRadio {
+///
+/// The request carries `dest` because the firmware copies it into the
+/// RouteDiscovery payload, and is sent reliably (`want_ack`) so a single
+/// dropped transmission does not lose the whole trace. `channel` should be
+/// the channel the destination was last heard on.
+pub fn traceroute_request(dest: u32, channel: u32) -> ToRadio {
     packet(MeshPacket {
         to: dest,
-        channel: 0,
-        want_ack: false,
+        channel,
+        want_ack: true,
         id: next_packet_id(),
         hop_limit: DEFAULT_HOP_LIMIT,
         payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
             portnum: PortNum::TracerouteApp as i32,
             payload: Vec::new(),
             want_response: true,
+            dest,
             ..Default::default()
         })),
         ..Default::default()

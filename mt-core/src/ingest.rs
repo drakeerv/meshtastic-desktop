@@ -214,17 +214,61 @@ impl Supervisor {
         }
     }
 
+    /// Handle a traceroute packet.
+    ///
+    /// The wire payload stores intermediate hops only; the endpoints are
+    /// rebuilt here so consumers get the full path. For both directions,
+    /// SNR list index `i` labels the link between hop `i` and hop `i + 1`.
     fn on_traceroute_packet(&mut self, packet: &MeshPacket, data: &Data) {
-        let Ok(route) = RouteDiscovery::decode(data.payload.as_slice()) else {
+        // Requests are promiscuously relayed; only responses carry a route.
+        if data.want_response {
+            return;
+        }
+        let Ok(discovery) = RouteDiscovery::decode(data.payload.as_slice()) else {
             return;
         };
+
+        // Firmware leaves `dest`/`source` unset on responses; the packet
+        // header says it all: `to` is the trace origin, `from` the target.
+        let origin = if data.dest != 0 {
+            data.dest
+        } else if packet.to != 0 && packet.to != mt_protocol::constants::BROADCAST_ADDR {
+            packet.to
+        } else {
+            self.state.my_num().unwrap_or(0)
+        };
+        let target = if data.source != 0 {
+            data.source
+        } else {
+            packet.from
+        };
+
+        let mut route = Vec::with_capacity(discovery.route.len() + 2);
+        route.push(origin);
+        route.extend(discovery.route.iter().copied());
+        route.push(target);
+
+        let mut route_back = Vec::with_capacity(discovery.route_back.len() + 2);
+        route_back.push(target);
+        route_back.extend(discovery.route_back.iter().copied());
+        route_back.push(origin);
+
+        tracing::debug!(
+            packet_id = data.request_id,
+            target,
+            ?route,
+            ?route_back,
+            snr_towards = ?discovery.snr_towards,
+            snr_back = ?discovery.snr_back,
+            "traceroute response"
+        );
         self.emit(CoreEvent::Traceroute {
             packet_id: data.request_id,
-            from: packet.from,
-            route: route.route,
-            snr_towards: route.snr_towards,
-            route_back: route.route_back,
-            snr_back: route.snr_back,
+            target,
+            route,
+            snr_towards: discovery.snr_towards,
+            route_back,
+            snr_back: discovery.snr_back,
         });
     }
 

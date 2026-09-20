@@ -191,6 +191,43 @@ async fn mock_handshake_ingest_and_messaging() {
     assert!(delivered.0, "outgoing message should be stored immediately");
     assert!(delivered.1, "message should pass through Enroute");
 
+    // A traceroute response only carries intermediate hops on the wire; the
+    // core rebuilds the full path with both endpoints for each direction.
+    core.dispatch(CoreCommand::Traceroute(dm_target))
+        .await
+        .unwrap();
+    let traceroute = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(CoreEvent::Traceroute {
+                target,
+                route,
+                snr_towards,
+                route_back,
+                snr_back,
+                ..
+            }) = events.recv().await
+            {
+                return (target, route, snr_towards, route_back, snr_back);
+            }
+        }
+    })
+    .await
+    .expect("traceroute response was never emitted");
+
+    assert_eq!(traceroute.0, dm_target, "target is the responding node");
+    assert_eq!(
+        traceroute.1,
+        vec![handshake.node_num, 0x0BAD_CAFE, dm_target],
+        "forward route includes origin and target"
+    );
+    assert_eq!(traceroute.2, vec![8, -20]);
+    assert_eq!(
+        traceroute.3,
+        vec![dm_target, 0x0BAD_CAFE, handshake.node_num],
+        "return route includes target and origin"
+    );
+    assert_eq!(traceroute.4, vec![-4, -12]);
+
     // Removing a node drops it locally and tells the device to forget it.
     let target = handshake
         .node_nums
