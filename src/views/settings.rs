@@ -493,21 +493,11 @@ fn device_page(app: &App) -> Element<'_, Message> {
                 ),
             ),
             setting_row(
-                "Location",
-                "Use this computer's location as the device's fixed position. Tries GeoClue2, then gpsd.",
-                action_button(
-                    lucide::locate_fixed()
-                        .size(14)
-                        .color(if connected {
-                            theme::text()
-                        } else {
-                            theme::text_faint()
-                        })
-                        .into(),
-                    "Use host location",
-                    connected,
-                    Message::UseHostLocation,
-                ),
+                "Share host location",
+                "Send this computer's location to this device, updating on movement or every 30 s. Tries GeoClue2, then gpsd. Remembered for the device and re-sent on every connect.",
+                checkbox(app.share_location_enabled())
+                    .on_toggle(Message::ToggleShareLocation)
+                    .into(),
             ),
             setting_row(
                 "Allow IP-based location",

@@ -56,6 +56,10 @@ pub struct AppSettings {
     pub online_tiles: bool,
     /// Allow the IP-based location fallback when GeoClue and gpsd are absent.
     pub use_ip_location: bool,
+    /// Device addresses whose host location should be shared automatically
+    /// while connected. Keyed by `DeviceAddress::to_string` so the choice
+    /// survives reconnects and restarts.
+    pub share_location_devices: Vec<String>,
     /// Hide to the system tray instead of quitting when the window is closed.
     pub close_to_tray: bool,
     /// Boost contrast of borders and secondary text.
@@ -84,6 +88,7 @@ impl Default for AppSettings {
             imperial: false,
             online_tiles: false,
             use_ip_location: false,
+            share_location_devices: Vec::new(),
             close_to_tray: true,
             high_contrast: false,
             ui_scale: 1.0,
@@ -122,5 +127,41 @@ impl AppSettings {
         if let Ok(text) = serde_json::to_string_pretty(self) {
             let _ = std::fs::write(path, text);
         }
+    }
+
+    /// Whether the device at `address` shares the host's location.
+    pub fn shares_location(&self, address: Option<&str>) -> bool {
+        match address {
+            Some(address) => self.share_location_devices.iter().any(|d| d == address),
+            None => false,
+        }
+    }
+
+    /// Enable or disable location sharing for `address`.
+    pub fn set_shares_location(&mut self, address: &str, enabled: bool) {
+        self.share_location_devices.retain(|d| d != address);
+        if enabled {
+            self.share_location_devices.push(address.to_string());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn location_sharing_is_per_device() {
+        let mut settings = AppSettings::default();
+        assert!(!settings.shares_location(Some("xaa")));
+        assert!(!settings.shares_location(None));
+
+        settings.set_shares_location("xaa", true);
+        assert!(settings.shares_location(Some("xaa")));
+        assert!(!settings.shares_location(Some("xbb")));
+
+        settings.set_shares_location("xaa", false);
+        assert!(!settings.shares_location(Some("xaa")));
+        assert!(settings.share_location_devices.is_empty());
     }
 }

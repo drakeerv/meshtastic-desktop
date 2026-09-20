@@ -3,6 +3,7 @@ Type=Application
 Name=Meshtastic
 GenericName=Mesh Radio
 Comment=Meshtastic client for Linux
+X-Geoclue-Reason=Show your node and mesh neighbours on the map.
 Exec=@EXEC@
 Icon=org.meshtastic.Meshtastic
 Terminal=false

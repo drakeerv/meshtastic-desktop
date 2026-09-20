@@ -306,11 +306,11 @@ pub enum Message {
     FillTimezoneFromHost,
     /// Send this computer's clock to the device.
     SyncClockFromHost,
-    /// Ask GeoClue for this computer's location and use it as the device's
-    /// fixed position.
-    UseHostLocation,
-    /// The outcome of [`Message::UseHostLocation`].
-    HostLocationReady(Result<crate::location::Fix, String>),
+    /// A fix from the host location stream.
+    HostLocationFix(Result<crate::location::Fix, String>),
+    /// Enable or disable automatic host-location sharing for the current
+    /// device, persisted per address.
+    ToggleShareLocation(bool),
     /// Allow the IP-based location fallback.
     ToggleIpLocation(bool),
     /// Manual fixed position, in decimal degrees.
@@ -446,6 +446,8 @@ pub struct App {
     /// Manual fixed position input, in decimal degrees.
     pub manual_lat: String,
     pub manual_lon: String,
+    /// Most recent host fix; resent when a sharing device connects.
+    pub last_fix: Option<crate::location::Fix>,
 
     pub now: i64,
     pub system_mode: Option<iced::theme::Mode>,
@@ -526,6 +528,7 @@ impl App {
             ui_scale_draft,
             manual_lat: String::new(),
             manual_lon: String::new(),
+            last_fix: None,
             now: mt_persistence::now_unix(),
             system_mode: None,
             tray: TrayHandle::spawn(),
@@ -581,6 +584,48 @@ impl App {
 
     pub fn is_connected(&self) -> bool {
         self.conn.is_connected()
+    }
+
+    /// Address of the device the location toggle applies to: the connected
+    /// one, or the last device we connected to.
+    pub fn location_device(&self) -> Option<String> {
+        self.conn
+            .address()
+            .map(ToString::to_string)
+            .or_else(|| self.settings.last_address.clone())
+    }
+
+    /// Whether the current device shares the host's location.
+    pub fn share_location_enabled(&self) -> bool {
+        self.settings
+            .shares_location(self.location_device().as_deref())
+    }
+
+    /// Whether any known device has location sharing on. Keeps the provider
+    /// stream alive across reconnects so authorization is granted once.
+    pub fn any_location_sharing(&self) -> bool {
+        !self.settings.share_location_devices.is_empty()
+    }
+
+    /// Hand a host fix to the core as a local position packet.
+    fn send_position(&self, fix: crate::location::Fix) {
+        tracing::debug!(
+            source = fix.source,
+            accuracy = fix.accuracy,
+            latitude = fix.latitude,
+            longitude = fix.longitude,
+            "forwarding host location to device"
+        );
+        let position = Position {
+            latitude_i: Some((fix.latitude * 1e7) as i32),
+            longitude_i: Some((fix.longitude * 1e7) as i32),
+            time: mt_persistence::now_unix() as u32,
+            ..Default::default()
+        };
+        let _ = self
+            .bridge
+            .core()
+            .try_dispatch(CoreCommand::SendPosition(position));
     }
 
     /// Display name for a node number, resolving from the node map.
@@ -1028,7 +1073,7 @@ impl App {
         let _ = self
             .bridge
             .core()
-            .try_dispatch(CoreCommand::SetFixedPosition(position));
+            .try_dispatch(CoreCommand::SendPosition(position));
         self.push_notice(format!(
             "manual position sent: {latitude:.5}, {longitude:.5}"
         ));
@@ -1418,41 +1463,40 @@ impl App {
                     .try_dispatch(CoreCommand::SetTime(seconds));
                 self.push_notice("device clock set from host");
             }
-            Message::UseHostLocation => {
-                self.push_notice("asking the host for a location");
-                let client = self.http.clone();
-                let allow_ip = self.settings.use_ip_location;
-                return Task::perform(
-                    crate::location::locate(client, allow_ip),
-                    Message::HostLocationReady,
-                );
+            Message::HostLocationFix(Ok(fix)) => {
+                self.last_fix = Some(fix);
+                if self.is_connected() && self.share_location_enabled() {
+                    self.send_position(fix);
+                }
             }
-            Message::HostLocationReady(Ok(fix)) => {
-                let position = Position {
-                    latitude_i: Some((fix.latitude * 1e7) as i32),
-                    longitude_i: Some((fix.longitude * 1e7) as i32),
-                    time: mt_persistence::now_unix() as u32,
-                    ..Default::default()
+            Message::HostLocationFix(Err(error)) => {
+                // Only surface the failure when location sharing is on; a
+                // disabled feature should stay quiet.
+                if self.share_location_enabled() {
+                    self.push_notice(format!("host location failed: {error}"));
+                }
+            }
+            Message::ToggleShareLocation(enabled) => {
+                let Some(address) = self.location_device() else {
+                    self.push_notice("connect to a device before sharing its location");
+                    return Task::none();
                 };
-                let _ = self
-                    .bridge
-                    .core()
-                    .try_dispatch(CoreCommand::SetFixedPosition(position));
-                let fix_note = if fix.accuracy > 0.0 {
-                    format!(
-                        "{} location sent: {:.5}, {:.5} (±{:.0} m)",
-                        fix.source, fix.latitude, fix.longitude, fix.accuracy
-                    )
+                self.settings.set_shares_location(&address, enabled);
+                self.settings.save();
+                if enabled {
+                    self.push_notice(if self.is_connected() {
+                        "sharing host location with this device"
+                    } else {
+                        "host location will be shared when this device connects"
+                    });
+                    if self.is_connected() {
+                        if let Some(fix) = self.last_fix {
+                            self.send_position(fix);
+                        }
+                    }
                 } else {
-                    format!(
-                        "{} location sent: {:.5}, {:.5}",
-                        fix.source, fix.latitude, fix.longitude
-                    )
-                };
-                self.push_notice(fix_note);
-            }
-            Message::HostLocationReady(Err(error)) => {
-                self.push_notice(format!("host location failed: {error}"));
+                    self.push_notice("host location sharing disabled");
+                }
             }
             Message::ToggleIpLocation(value) => {
                 self.settings.use_ip_location = value;
@@ -1864,6 +1908,16 @@ impl App {
                     self.my_node_num = Some(*node_num);
                     self.ble_pairing = None;
                     let _ = self.bridge.discovery().stop_ble_scan();
+                    // Push the latest known fix so the device starts sharing
+                    // immediately even if the host has not moved since.
+                    if self
+                        .settings
+                        .shares_location(self.settings.last_address.as_deref())
+                    {
+                        if let Some(fix) = self.last_fix {
+                            self.send_position(fix);
+                        }
+                    }
                     tracing::info!(
                         node_num,
                         device_configs = self.device_configs.len(),
@@ -2137,6 +2191,16 @@ impl App {
                     .map(|_| Message::PruneNotices),
             );
         }
+        // Host location streaming runs while any device wants it, so the
+        // provider (and its authorization) survives reconnects.
+        if self.any_location_sharing() {
+            subscriptions.push(Subscription::run_with(
+                LocationShare {
+                    allow_ip: self.settings.use_ip_location,
+                },
+                location_stream,
+            ));
+        }
         Subscription::batch(subscriptions)
     }
 
@@ -2297,6 +2361,31 @@ fn send_on_ctrl_enter(
         }
     }
     None
+}
+
+/// Key for the host-location subscription. Changing it (enabled/disabled,
+/// IP fallback toggled) restarts the provider chain.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct LocationShare {
+    allow_ip: bool,
+}
+
+/// Stream host fixes into iced messages while location sharing is enabled.
+fn location_stream(key: &LocationShare) -> impl iced::futures::Stream<Item = Message> + use<> {
+    use iced::futures::SinkExt as _;
+
+    let allow_ip = key.allow_ip;
+    iced::stream::channel(16, async move |mut output| {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(async move {
+            crate::location::stream(allow_ip, tx).await;
+        });
+        while let Some(result) = rx.recv().await {
+            if output.send(Message::HostLocationFix(result)).await.is_err() {
+                break;
+            }
+        }
+    })
 }
 
 /// Global keyboard shortcuts.

@@ -170,7 +170,11 @@ pub enum CoreCommand {
     SetModuleConfig(Box<ModuleConfig>),
     /// Set the device clock to the given Unix time, in seconds.
     SetTime(u32),
-    /// Set the device's fixed position, e.g. from the host's location.
+    /// Share a position with the device, e.g. from the host's location or
+    /// manual entry. Delivered as a mesh position packet, not an admin edit,
+    /// so the device applies it without rebooting.
+    SendPosition(Position),
+    /// Set the device's configured fixed position (admin edit; reboots).
     SetFixedPosition(Position),
     /// Re-run the config handshake with the current device.
     Resync,

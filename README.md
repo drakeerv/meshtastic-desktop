@@ -115,12 +115,16 @@ cargo run --release
   scripts/install-desktop.sh
   ```
 
-- **Host location**: "Use host location" tries **GeoClue2** (the `geoclue`
-  package) and **gpsd** (with a USB/serial GPS) first. On Arch, GeoClue may
-  need an allow-list entry in `/etc/geoclue/conf.d/` for
-  `org.meshtastic.Meshtastic`. The opt-in **IP fallback** needs no setup but is
-  city-level and shares your public IP with a third-party service. Manual
-  latitude/longitude entry always works.
+- **Host location**: enable **Share host location** in Settings to stream
+  this computer's position to the connected device (updates on movement or
+  every 30 s). It tries **GeoClue2** (the `geoclue` package) and **gpsd** (with
+  a USB/serial GPS). To skip the GeoClue agent's authorization prompt, run
+  `scripts/install-geoclue.sh`, which installs an allow-list drop-in for
+  `org.meshtastic.Meshtastic` under `/etc/geoclue/conf.d/`. Without it, agents
+  such as `geoclue-demo-agent` need the desktop entry from
+  `scripts/install-desktop.sh` (which carries `X-Geoclue-Reason`). The opt-in
+  **IP fallback** needs no setup but is city-level and shares your public IP
+  with a third-party service. Manual latitude/longitude entry always works.
 
 ## Workspace layout
 

@@ -1,17 +1,21 @@
 //! Host location, tried through a chain of providers.
 //!
-//! "Use host location" walks the providers in order and returns the first fix:
+//! Sharing walks the providers in order and forwards fixes until the
+//! consumer stops listening:
 //!
-//! 1. **GeoClue2** over D-Bus, the desktop standard.
-//! 2. **gpsd**, for a locally attached GPS receiver.
-//! 3. **IP geolocation** over HTTP, which needs no setup but is city-level and
-//!    shares the public IP with a third party, so it is opt-in.
+//! 1. **GeoClue2** over D-Bus, the desktop standard. Streams while the host
+//!    moves (or every 30 s at most).
+//! 2. **gpsd**, for a locally attached GPS receiver, polled every 30 s.
+//! 3. **IP geolocation** over HTTP, which needs no setup but is city-level
+//!    and shares the public IP with a third party, so it is opt-in. Sent
+//!    once: a city does not move.
 //!
 //! Manual entry lives in the UI and does not go through here.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
+use tokio::sync::mpsc;
 
 /// A location fix from whichever provider answered.
 #[derive(Debug, Clone, Copy)]
@@ -24,45 +28,34 @@ pub struct Fix {
     pub source: &'static str,
 }
 
-/// Try each provider in turn and return the first fix.
+/// Stream fixes from the first provider that works.
 ///
 /// `allow_ip` gates the IP fallback, which contacts an external service.
-pub async fn locate(client: reqwest::Client, allow_ip: bool) -> Result<Fix, String> {
+pub async fn stream(allow_ip: bool, tx: mpsc::Sender<Result<Fix, String>>) {
     let mut problems = Vec::new();
 
-    match crate::geoclue::locate().await {
-        Ok(fix) => {
-            return Ok(Fix {
-                latitude: fix.latitude,
-                longitude: fix.longitude,
-                accuracy: fix.accuracy,
-                source: "GeoClue",
-            });
-        }
+    match crate::geoclue::stream(tx.clone()).await {
+        Ok(()) => return,
         Err(err) => problems.push(err),
     }
 
-    match gpsd::locate().await {
-        Ok((latitude, longitude, accuracy)) => {
-            return Ok(Fix {
-                latitude,
-                longitude,
-                accuracy,
-                source: "gpsd",
-            });
-        }
+    match gpsd::stream(tx.clone()).await {
+        Ok(()) => return,
         Err(err) => problems.push(err),
     }
 
     if allow_ip {
-        match ip::locate(&client).await {
+        match ip::locate().await {
             Ok((latitude, longitude, accuracy)) => {
-                return Ok(Fix {
-                    latitude,
-                    longitude,
-                    accuracy,
-                    source: "IP address",
-                });
+                let _ = tx
+                    .send(Ok(Fix {
+                        latitude,
+                        longitude,
+                        accuracy,
+                        source: "IP address",
+                    }))
+                    .await;
+                return;
             }
             Err(err) => problems.push(err),
         }
@@ -70,10 +63,12 @@ pub async fn locate(client: reqwest::Client, allow_ip: bool) -> Result<Fix, Stri
         problems.push("IP geolocation is off".to_string());
     }
 
-    Err(format!(
-        "no location provider worked ({})",
-        problems.join("; ")
-    ))
+    let _ = tx
+        .send(Err(format!(
+            "no location provider worked ({})",
+            problems.join("; ")
+        )))
+        .await;
 }
 
 /// A locally attached GPS receiver, read through gpsd.
@@ -85,18 +80,23 @@ mod gpsd {
     const SOCKET: &str = "/run/gpsd.sock";
     const TCP: &str = "127.0.0.1:2947";
 
-    /// Ask gpsd for a fix, preferring its Unix socket and falling back to TCP.
-    pub async fn locate() -> Result<(f64, f64, f64), String> {
+    /// gpsd reports a fix about once per second; forward at most this often.
+    const SEND_INTERVAL: Duration = Duration::from_secs(30);
+    /// How long to wait for the next sentence before giving up.
+    const READ_TIMEOUT: Duration = Duration::from_secs(15);
+
+    /// Stream fixes from a GPS receiver until the consumer stops listening.
+    pub async fn stream(tx: mpsc::Sender<Result<Fix, String>>) -> Result<(), String> {
         if let Ok(stream) = tokio::net::UnixStream::connect(SOCKET).await {
-            return read_fix(stream).await;
+            return read_stream(stream, tx).await;
         }
         match tokio::net::TcpStream::connect(TCP).await {
-            Ok(stream) => read_fix(stream).await,
+            Ok(stream) => read_stream(stream, tx).await,
             Err(err) => Err(format!("gpsd not reachable: {err}")),
         }
     }
 
-    async fn read_fix<S>(stream: S) -> Result<(f64, f64, f64), String>
+    async fn read_stream<S>(stream: S, tx: mpsc::Sender<Result<Fix, String>>) -> Result<(), String>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
@@ -105,25 +105,42 @@ mod gpsd {
             .write_all(b"?WATCH={\"enable\":true,\"json\":true}\n")
             .await
             .map_err(|err| format!("gpsd write failed: {err}"))?;
-
         let mut lines = BufReader::new(read).lines();
-        let deadline = tokio::time::Instant::now() + TIMEOUT;
-        loop {
-            let line = tokio::time::timeout_at(deadline, lines.next_line())
-                .await
-                .map_err(|_| "timed out waiting for gpsd".to_string())?
-                .map_err(|err| format!("gpsd read failed: {err}"))?
-                .ok_or_else(|| "gpsd closed the connection".to_string())?;
+        let mut last_sent: Option<Instant> = None;
 
-            if let Some(fix) = parse_tpv(&line) {
-                let _ = write.write_all(b"?WATCH={\"enable\":false}\n").await;
-                return Ok(fix);
+        loop {
+            tokio::select! {
+                _ = tx.closed() => return Ok(()),
+                line = tokio::time::timeout(READ_TIMEOUT, lines.next_line()) => {
+                    let line = line
+                        .map_err(|_| "timed out waiting for gpsd".to_string())?
+                        .map_err(|err| format!("gpsd read failed: {err}"))?
+                        .ok_or_else(|| "gpsd closed the connection".to_string())?;
+                    let Some((latitude, longitude, accuracy)) = parse_tpv(&line) else {
+                        continue;
+                    };
+                    let due = last_sent
+                        .map(|at| at.elapsed() >= SEND_INTERVAL)
+                        .unwrap_or(true);
+                    if due {
+                        last_sent = Some(Instant::now());
+                        if tx
+                            .send(Ok(Fix {
+                                latitude,
+                                longitude,
+                                accuracy,
+                                source: "gpsd",
+                            }))
+                            .await
+                            .is_err()
+                        {
+                            return Ok(());
+                        }
+                    }
+                }
             }
         }
     }
-
-    /// How long to wait for gpsd to report a fix.
-    const TIMEOUT: Duration = Duration::from_secs(15);
 
     /// Pull a fix out of a gpsd `TPV` sentence, if it has one.
     pub(super) fn parse_tpv(line: &str) -> Option<(f64, f64, f64)> {
@@ -161,8 +178,8 @@ mod ip {
         longitude: Option<f64>,
     }
 
-    pub async fn locate(client: &reqwest::Client) -> Result<(f64, f64, f64), String> {
-        let response = client
+    pub async fn locate() -> Result<(f64, f64, f64), String> {
+        let response = reqwest::Client::new()
             .get("https://ipwho.is/")
             .send()
             .await

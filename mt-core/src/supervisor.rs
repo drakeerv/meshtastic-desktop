@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use meshtastic_protobufs::meshtastic::{NodeInfo, SharedContact, ToRadio, admin_message};
+use meshtastic_protobufs::meshtastic::{NodeInfo, Position, SharedContact, ToRadio, admin_message};
 use mt_persistence::{Database, MessageFilter, MessageQuery, now_unix};
 use mt_transport::{DeviceAddress, TransportEvent, TransportHandle, spawn_transport};
 use tokio::sync::{broadcast, mpsc};
@@ -91,6 +91,10 @@ pub(crate) struct Supervisor {
     handshake_retried: bool,
     handshake_deadline: Instant,
     next_heartbeat: Instant,
+    /// Set when we deliberately made the device reboot (admin edit commit,
+    /// reboot, shutdown, factory reset). The resulting link drop is expected
+    /// and must not surface as a connection error.
+    expect_reboot: bool,
 }
 
 impl Supervisor {
@@ -117,6 +121,7 @@ impl Supervisor {
             handshake_retried: false,
             handshake_deadline: Instant::now(),
             next_heartbeat: Instant::now(),
+            expect_reboot: false,
         }
     }
 
@@ -224,6 +229,7 @@ impl Supervisor {
         self.handshake_deadline = Instant::now() + self.cfg.handshake_timeout;
         self.next_heartbeat = Instant::now() + self.cfg.heartbeat_interval;
         self.session_passkey.clear();
+        self.expect_reboot = false;
 
         let (handle, mut events) = spawn_transport(addr.clone());
         self.transport = Some(handle);
@@ -267,6 +273,14 @@ impl Supervisor {
                         self.emit(CoreEvent::BlePairingRequest { address })
                     }
                     Some(TransportEvent::Disconnected { error }) => {
+                        if self.expect_reboot {
+                            // Firmware disables Bluetooth and reboots when an
+                            // edit transaction is committed; the transport
+                            // failure that follows is the expected reboot.
+                            tracing::info!("device rebooted; reconnecting");
+                            self.reconnect_attempt = self.reconnect_attempt.max(2);
+                            break SessionOutcome::Reconnect;
+                        }
                         tracing::info!(?error, "transport disconnected");
                         if let Some(err) = &error {
                             self.emit(CoreEvent::Error(format!("connection lost: {err}")));
@@ -449,6 +463,7 @@ impl Supervisor {
                 self.send_to_radio(mt_protocol::builders::set_time_only(seconds))
                     .await
             }
+            C::SendPosition(position) => self.share_position(position).await,
             C::SetFixedPosition(position) => {
                 let msg = self.admin_radio(
                     admin_message::PayloadVariant::SetFixedPosition(position),
@@ -475,7 +490,7 @@ impl Supervisor {
                     false,
                     dest,
                 );
-                self.send_online(msg).await
+                self.send_self_targeted(msg, dest).await
             }
             C::Shutdown { dest, seconds } => {
                 let msg = self.admin_radio(
@@ -483,7 +498,7 @@ impl Supervisor {
                     false,
                     dest,
                 );
-                self.send_online(msg).await
+                self.send_self_targeted(msg, dest).await
             }
             C::FactoryReset { dest, full_device } => {
                 let variant = if full_device {
@@ -492,7 +507,7 @@ impl Supervisor {
                     admin_message::PayloadVariant::FactoryResetConfig(1)
                 };
                 let msg = self.admin_radio(variant, false, dest);
-                self.send_online(msg).await
+                self.send_self_targeted(msg, dest).await
             }
             C::SetAutoReconnect(enabled) => {
                 self.cfg.auto_reconnect = enabled;
@@ -520,6 +535,18 @@ impl Supervisor {
         self.send_to_radio(msg).await
     }
 
+    /// Send an admin message, flagging an expected reboot when the target is
+    /// this node (firmware reboots and drops the link for those commands).
+    async fn send_self_targeted(&mut self, msg: ToRadio, dest: u32) -> Result<()> {
+        let result = self.send_online(msg).await;
+        if result.is_ok()
+            && (dest == mt_protocol::constants::BROADCAST_ADDR || Some(dest) == self.state.my_num())
+        {
+            self.expect_reboot = true;
+        }
+        result
+    }
+
     /// Build an admin packet, injecting the current session passkey.
     fn admin_radio(
         &self,
@@ -533,6 +560,10 @@ impl Supervisor {
     }
 
     /// Apply an admin change inside a begin/commit edit session.
+    ///
+    /// Committing makes the firmware persist the change, disable Bluetooth
+    /// and reboot, so the link drop that follows is expected rather than a
+    /// connection failure.
     async fn apply_admin_edit(&mut self, set: ToRadio) -> Result<()> {
         if !self.handshake_complete {
             return Err(CoreError::NotConnected);
@@ -543,10 +574,42 @@ impl Supervisor {
         time::sleep(Duration::from_millis(150)).await;
         self.send_to_radio(set).await?;
         time::sleep(Duration::from_millis(150)).await;
-        let _ = self
+        if self
             .send_to_radio(mt_protocol::builders::commit_edit_settings())
-            .await;
+            .await
+            .is_ok()
+        {
+            self.expect_reboot = true;
+        }
         Ok(())
+    }
+
+    /// Share a position with the device as a local `POSITION_APP` packet.
+    ///
+    /// This is how the official clients hand the host's location to the
+    /// radio: the firmware delivers the packet to itself and applies it
+    /// immediately, with no edit transaction and no reboot.
+    async fn share_position(&mut self, position: Position) -> Result<()> {
+        if !self.handshake_complete {
+            return Err(CoreError::NotConnected);
+        }
+        let my_num = self.state.my_num().ok_or(CoreError::NotConnected)?;
+
+        // Reflect the fix in the node list immediately; the firmware's
+        // NodeInfo stream confirms it a moment later.
+        if let Some(mut node) = self.state.nodes.get(&my_num).cloned() {
+            node.position = Some(position.clone());
+            node.last_heard = now_unix() as u32;
+            let node = self.state.upsert_node(node);
+            if let Some(db) = &self.db {
+                let _ = db.upsert_node(&node);
+                let _ = db.insert_position(my_num, &position);
+            }
+            self.emit(CoreEvent::Node(Box::new(node)));
+        }
+
+        self.send_to_radio(mt_protocol::builders::position_update(&position, my_num))
+            .await
     }
 
     fn set_favorite(&mut self, node_num: u32, favorite: bool) -> Result<()> {

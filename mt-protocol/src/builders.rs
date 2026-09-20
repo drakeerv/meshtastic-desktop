@@ -5,7 +5,7 @@
 //! (`Meshtastic-Android`, `Meshtastic-Apple`, `Meshtastic-JS`).
 
 use meshtastic_protobufs::meshtastic::{
-    AdminMessage, Data, MeshPacket, PortNum, ToRadio, User, admin_message,
+    AdminMessage, Data, MeshPacket, PortNum, Position, ToRadio, User, admin_message,
     admin_message::{ConfigType, ModuleConfigType},
     mesh_packet, to_radio,
 };
@@ -287,6 +287,28 @@ pub fn factory_reset(dest: u32, full_device: bool) -> ToRadio {
     admin_packet(dest, admin(variant), false)
 }
 
+/// Shares a position with the device as a `POSITION_APP` packet addressed to
+/// the local node, like the official clients.
+///
+/// The firmware delivers packets destined for itself locally
+/// (`Router::sendLocal`), so the position module applies it directly: no
+/// admin edit transaction, and therefore no config commit or reboot.
+pub fn position_update(position: &Position, to: u32) -> ToRadio {
+    packet(MeshPacket {
+        to,
+        channel: 0,
+        want_ack: false,
+        id: next_packet_id(),
+        hop_limit: 0,
+        payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
+            portnum: PortNum::PositionApp as i32,
+            payload: crate::frame::encode_protobuf(position),
+            ..Default::default()
+        })),
+        ..Default::default()
+    })
+}
+
 /// Requests a position report from a node.
 pub fn position_request(dest: u32) -> ToRadio {
     packet(MeshPacket {
@@ -451,6 +473,28 @@ mod tests {
             admin.payload_variant,
             Some(admin_message::PayloadVariant::SetTimeOnly(1_700_000_000))
         ));
+    }
+
+    #[test]
+    fn position_update_is_a_local_position_packet() {
+        let position = Position {
+            latitude_i: Some(370_000_000),
+            longitude_i: Some(-800_000_000),
+            ..Default::default()
+        };
+        let m = position_update(&position, 0x1234_5678);
+        let Some(to_radio::PayloadVariant::Packet(p)) = m.payload_variant else {
+            panic!("no packet");
+        };
+        assert_eq!(p.to, 0x1234_5678);
+        assert_eq!(p.hop_limit, 0);
+        let Some(mesh_packet::PayloadVariant::Decoded(d)) = p.payload_variant else {
+            panic!("not decoded");
+        };
+        assert_eq!(d.portnum, PortNum::PositionApp as i32);
+        let decoded = Position::decode(d.payload.as_slice()).unwrap();
+        assert_eq!(decoded.latitude_i, Some(370_000_000));
+        assert_eq!(decoded.longitude_i, Some(-800_000_000));
     }
 
     #[test]
