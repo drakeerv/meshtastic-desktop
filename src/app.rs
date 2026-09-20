@@ -13,7 +13,7 @@ use meshtastic_protobufs::meshtastic::{
 };
 use mt_core::{
     ConnectionState, CoreCommand, CoreEvent, CoreHandle, DeviceAddress, DiscoveredDevice,
-    DiscoveryEvent, MessageRecord, TransportKind,
+    DiscoveryEvent, MessageFilter, MessageRecord, TransportKind,
 };
 use mt_transport::DiscoveryHandle;
 
@@ -87,6 +87,25 @@ pub enum SettingsPage {
 pub enum Conversation {
     Channel(u32),
     Peer(u32),
+}
+
+impl Conversation {
+    /// A stable key for storing per-conversation state (e.g. unread marks).
+    pub fn key(self) -> String {
+        match self {
+            Conversation::Channel(channel) => format!("c{channel}"),
+            Conversation::Peer(peer) => format!("p{peer}"),
+        }
+    }
+}
+
+/// A destructive action awaiting confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmAction {
+    /// Forget every message in a conversation.
+    ClearConversation(Conversation),
+    /// Delete a single stored message.
+    DeleteMessage { id: i64, conversation: Conversation },
 }
 
 /// Which transport the Connect view is filtered to.
@@ -222,6 +241,20 @@ pub enum Message {
     SelectPeer(u32),
     ComposeChanged(String),
     SendPressed,
+    /// Filter the conversation list and search across all messages.
+    SearchQueryChanged(String),
+    /// Open the conversation a search result belongs to.
+    OpenSearchResult(Conversation),
+    /// Load the last device's history at startup so Messages works offline.
+    LoadOfflineHistory,
+    /// Ask to clear the active conversation (opens a confirmation dialog).
+    RequestClearConversation,
+    /// Ask to delete a single message (opens a confirmation dialog).
+    RequestDelete(i64),
+    /// Confirm the pending destructive action.
+    ConfirmPending,
+    /// Dismiss the pending destructive action.
+    CancelPending,
 
     // nodes view
     NodeSearchChanged(String),
@@ -361,6 +394,10 @@ pub struct App {
     // messages view
     pub conversation: Conversation,
     pub compose: String,
+    /// Search text that filters the conversation list and searches messages.
+    pub message_search: String,
+    /// A destructive action awaiting confirmation.
+    pub pending_confirm: Option<ConfirmAction>,
 
     // nodes view
     pub node_search: String,
@@ -427,6 +464,7 @@ impl App {
         };
         let online_tiles = settings.online_tiles;
         let ui_scale_draft = settings.ui_scale;
+        let last_node_num = settings.last_node_num;
         // A daemon starts with no window; open the main one here.
         let (window_id, open_window) = iced::window::open(crate::window_settings());
         let app = Self {
@@ -434,7 +472,7 @@ impl App {
             settings,
             tab,
             conn: ConnectionState::Disconnected,
-            my_node_num: None,
+            my_node_num: last_node_num,
             my_info: None,
             metadata: None,
             nodes: HashMap::new(),
@@ -459,6 +497,8 @@ impl App {
             ble_scanning: false,
             conversation: Conversation::Channel(0),
             compose: String::new(),
+            message_search: String::new(),
+            pending_confirm: None,
             node_search: String::new(),
             selected_node: None,
             contact_qr: None,
@@ -488,6 +528,7 @@ impl App {
         let boot = Task::batch([
             iced::system::theme().map(Message::SystemTheme),
             open_window.map(|id| Message::WindowId(Some(id))),
+            Task::done(Message::LoadOfflineHistory),
         ]);
         (app, boot)
     }
@@ -620,6 +661,203 @@ impl App {
     /// The newest message in a conversation, if any.
     pub fn latest_message(&self, conversation: Conversation) -> Option<&MessageRecord> {
         self.messages_for(conversation).into_iter().last()
+    }
+
+    /// Every conversation with at least one stored message.
+    pub fn all_conversations(&self) -> Vec<Conversation> {
+        let mut conversations = Vec::new();
+        for message in &self.messages {
+            if let Some(conversation) = self.conversation_for(message) {
+                if !conversations.contains(&conversation) {
+                    conversations.push(conversation);
+                }
+            }
+        }
+        conversations
+    }
+
+    /// The conversation a stored message belongs to, if identifiable.
+    pub fn conversation_for(&self, message: &MessageRecord) -> Option<Conversation> {
+        let broadcast = u32::MAX;
+        if message.to == broadcast {
+            return Some(Conversation::Channel(message.channel));
+        }
+        let me = self.my_node_num?;
+        let other = if message.from == me {
+            message.to
+        } else if message.to == me {
+            message.from
+        } else {
+            return None;
+        };
+        if other == 0 || other == me || other == broadcast {
+            None
+        } else {
+            Some(Conversation::Peer(other))
+        }
+    }
+
+    /// A display name for a conversation.
+    pub fn conversation_name(&self, conversation: Conversation) -> String {
+        match conversation {
+            Conversation::Channel(index) => {
+                let custom = self
+                    .channels
+                    .iter()
+                    .find(|c| c.index as u32 == index)
+                    .and_then(|c| c.settings.as_ref())
+                    .map(|s| s.name.as_str());
+                format::channel_name(custom, index)
+            }
+            Conversation::Peer(peer) => self.node_name(peer),
+        }
+    }
+
+    /// The settings key for a conversation's read mark.
+    fn read_key(&self, conversation: Conversation) -> String {
+        let node = self.my_node_num.unwrap_or(0);
+        format!("{node}:{}", conversation.key())
+    }
+
+    /// The id of the newest message read in a conversation (0 = never).
+    fn read_mark(&self, conversation: Conversation) -> i64 {
+        self.settings
+            .read_marks
+            .get(&self.read_key(conversation))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// How many incoming messages in a conversation are unread.
+    pub fn unread_count(&self, conversation: Conversation) -> usize {
+        let mark = self.read_mark(conversation);
+        self.messages_for(conversation)
+            .into_iter()
+            .filter(|message| !message.outgoing && message.id > mark)
+            .count()
+    }
+
+    /// Total unread across every conversation, for the rail badge.
+    pub fn total_unread(&self) -> usize {
+        let mut total = 0;
+        for channel in self.active_channels() {
+            total += self.unread_count(Conversation::Channel(channel.index.max(0) as u32));
+        }
+        for peer in self.peers() {
+            total += self.unread_count(Conversation::Peer(peer));
+        }
+        total
+    }
+
+    /// Messages whose text or sender matches the search box, newest first.
+    pub fn search_messages(&self) -> Vec<&MessageRecord> {
+        let needle = self.message_search.trim().to_lowercase();
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let mut matches: Vec<&MessageRecord> = self
+            .messages
+            .iter()
+            .filter(|message| {
+                message.text.to_lowercase().contains(&needle)
+                    || self
+                        .node_name(message.from)
+                        .to_lowercase()
+                        .contains(&needle)
+            })
+            .collect();
+        matches.reverse();
+        matches
+    }
+
+    /// Advance a conversation's read mark to its newest message.
+    fn mark_active_conversation_read(&mut self) {
+        if self.advance_read_mark() {
+            self.settings.save();
+        }
+    }
+
+    /// Advance the active conversation's read mark; returns whether it moved.
+    fn advance_read_mark(&mut self) -> bool {
+        let conversation = self.conversation;
+        let Some(newest) = self
+            .messages_for(conversation)
+            .into_iter()
+            .map(|m| m.id)
+            .max()
+        else {
+            return false;
+        };
+        let key = self.read_key(conversation);
+        let current = self.settings.read_marks.get(&key).copied().unwrap_or(0);
+        if newest > current {
+            self.settings.read_marks.insert(key, newest);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Mark the active conversation read when its timeline is on screen.
+    fn mark_active_conversation_read_if_viewing(&mut self) {
+        if self.tab == Tab::Messages && self.window_id.is_some() {
+            self.mark_active_conversation_read();
+        }
+    }
+
+    /// Build the persistence filter for a conversation, if identifiable.
+    fn conversation_filter(&self, conversation: Conversation) -> Option<MessageFilter> {
+        match conversation {
+            Conversation::Channel(channel) => Some(MessageFilter::Channel(channel)),
+            Conversation::Peer(peer) => {
+                let my_num = self.my_node_num?;
+                Some(MessageFilter::Peer { my_num, peer })
+            }
+        }
+    }
+
+    /// Run a destructive action the user confirmed.
+    fn apply_confirm(&mut self, action: ConfirmAction) {
+        match action {
+            ConfirmAction::ClearConversation(conversation) => {
+                if let Some(filter) = self.conversation_filter(conversation) {
+                    let _ = self
+                        .bridge
+                        .core()
+                        .try_dispatch(CoreCommand::ClearConversation(Box::new(filter)));
+                }
+            }
+            ConfirmAction::DeleteMessage { id, .. } => {
+                let _ = self
+                    .bridge
+                    .core()
+                    .try_dispatch(CoreCommand::DeleteMessage(id));
+            }
+        }
+    }
+
+    /// Treat a device's existing history as read the first time it is loaded.
+    fn seed_read_marks(&mut self) -> bool {
+        let Some(me) = self.my_node_num else {
+            return false;
+        };
+        if self.settings.known_history.contains(&me) {
+            return false;
+        }
+        let conversations = self.all_conversations();
+        for conversation in conversations {
+            if let Some(newest) = self
+                .messages_for(conversation)
+                .into_iter()
+                .map(|m| m.id)
+                .max()
+            {
+                let key = self.read_key(conversation);
+                self.settings.read_marks.insert(key, newest);
+            }
+        }
+        self.settings.known_history.push(me);
+        true
     }
 
     /// Nodes matching the current search, sorted favourites-first then name.
@@ -809,7 +1047,9 @@ impl App {
 
     /// Close the topmost dismissible UI, or clear the node selection.
     fn escape_pressed(&mut self) {
-        if self.contact_import.is_some() {
+        if self.pending_confirm.is_some() {
+            self.pending_confirm = None;
+        } else if self.contact_import.is_some() {
             self.contact_import = None;
         } else if self.contact_qr.is_some() {
             self.contact_qr = None;
@@ -905,6 +1145,7 @@ impl App {
             Message::Tick => {
                 self.now = mt_persistence::now_unix();
                 self.sync_tray();
+                self.mark_active_conversation_read_if_viewing();
                 // Keep the online tile layer topped up as the map moves or the
                 // local node reports a new position.
                 return self.ensure_tiles();
@@ -1002,12 +1243,42 @@ impl App {
 
             Message::SelectChannel(index) => {
                 self.conversation = Conversation::Channel(index);
+                self.mark_active_conversation_read();
             }
             Message::SelectPeer(peer) => {
                 self.conversation = Conversation::Peer(peer);
+                self.mark_active_conversation_read();
             }
             Message::ComposeChanged(value) => self.compose = value,
             Message::SendPressed => self.send_message(),
+            Message::SearchQueryChanged(value) => self.message_search = value,
+            Message::OpenSearchResult(conversation) => {
+                self.conversation = conversation;
+                self.mark_active_conversation_read();
+            }
+            Message::LoadOfflineHistory => {
+                if let Some(node_num) = self.settings.last_node_num {
+                    let _ = self
+                        .bridge
+                        .core()
+                        .try_dispatch(CoreCommand::LoadHistory(node_num));
+                }
+            }
+            Message::RequestClearConversation => {
+                self.pending_confirm = Some(ConfirmAction::ClearConversation(self.conversation));
+            }
+            Message::RequestDelete(id) => {
+                self.pending_confirm = Some(ConfirmAction::DeleteMessage {
+                    id,
+                    conversation: self.conversation,
+                });
+            }
+            Message::CancelPending => self.pending_confirm = None,
+            Message::ConfirmPending => {
+                if let Some(action) = self.pending_confirm.take() {
+                    self.apply_confirm(action);
+                }
+            }
 
             Message::NodeSearchChanged(value) => self.node_search = value,
             Message::NodeSelected(num) => self.selected_node = Some(num),
@@ -1015,6 +1286,7 @@ impl App {
             Message::OpenDirectMessage(num) => {
                 self.conversation = Conversation::Peer(num);
                 self.tab = Tab::Messages;
+                self.mark_active_conversation_read();
             }
             Message::OpenNodeDetails(num) => {
                 self.selected_node = Some(num);
@@ -1599,6 +1871,7 @@ impl App {
                 }
                 if let ConnectionState::Connected { address, node_num } = &state {
                     self.settings.last_address = Some(address.to_string());
+                    self.settings.last_node_num = Some(*node_num);
                     self.settings.save();
                     self.my_node_num = Some(*node_num);
                     self.ble_pairing = None;
@@ -1612,10 +1885,32 @@ impl App {
                         "handshake complete in ui"
                     );
                 }
+                // If a connection attempt failed before the handshake, the
+                // cache above was cleared; reload the last device's history so
+                // the Messages view stays useful offline.
+                if matches!(
+                    &state,
+                    ConnectionState::Disconnected | ConnectionState::Reconnecting { .. }
+                ) && self.messages.is_empty()
+                {
+                    if let Some(node_num) = self.settings.last_node_num {
+                        if self.my_node_num.is_none() {
+                            self.my_node_num = Some(node_num);
+                        }
+                        let _ = self
+                            .bridge
+                            .core()
+                            .try_dispatch(CoreCommand::LoadHistory(node_num));
+                    }
+                }
                 self.conn = state;
             }
             CoreEvent::MyInfo(info) => {
                 self.my_node_num = Some(info.my_node_num);
+                if self.settings.last_node_num != Some(info.my_node_num) {
+                    self.settings.last_node_num = Some(info.my_node_num);
+                    self.settings.save();
+                }
                 if let Some(node) = self.nodes.get(&info.my_node_num) {
                     self.owner_long = node
                         .user
@@ -1687,12 +1982,16 @@ impl App {
                         )
                     })
                     .collect();
+                if self.seed_read_marks() {
+                    self.settings.save();
+                }
             }
             CoreEvent::Message(record) => {
                 if !record.outgoing && self.settings.notifications {
                     self.notify_incoming(&record);
                 }
                 self.merge_message(*record);
+                self.mark_active_conversation_read_if_viewing();
             }
             CoreEvent::MessageStatus {
                 packet_id,
@@ -1884,7 +2183,9 @@ impl App {
             .height(Length::Fill)
             .into();
 
-        let dialog = views::contact::overlay(self).or_else(|| views::pairing::overlay(self));
+        let dialog = views::messages::confirm_overlay(self)
+            .or_else(|| views::contact::overlay(self))
+            .or_else(|| views::pairing::overlay(self));
         match dialog {
             Some(dialog) => iced::widget::stack![base, dialog]
                 .width(Length::Fill)
@@ -2349,5 +2650,135 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    /// A stored message with sane defaults for the tests below.
+    fn message(id: i64, from: u32, to: u32, outgoing: bool, text: &str) -> MessageRecord {
+        MessageRecord {
+            id,
+            packet_id: id as u32,
+            channel: 0,
+            from,
+            to,
+            portnum: 1,
+            text: text.to_string(),
+            sent_at: 1_700_000_000 + id,
+            received_at: 1_700_000_000 + id,
+            status: mt_core::MessageStatus::Delivered,
+            outgoing,
+            want_ack: false,
+            reply_id: 0,
+            rx_snr: None,
+            rx_rssi: None,
+            hop_start: None,
+            hop_limit: None,
+            error: None,
+        }
+    }
+
+    fn test_app() -> App {
+        let core = mt_core::spawn_core(mt_core::CoreConfig::default());
+        let discovery = mt_transport::spawn_discovery();
+        let (app, _task) = App::new(core, discovery, AppSettings::default());
+        app
+    }
+
+    #[tokio::test]
+    async fn unread_counts_incoming_after_the_read_mark() {
+        let mut app = test_app();
+        app.my_node_num = Some(1);
+        app.messages = vec![
+            message(1, 2, 1, false, "hello"),
+            message(2, 1, 2, true, "reply"),
+            message(3, 2, 1, false, "again"),
+        ];
+        let conversation = Conversation::Peer(2);
+
+        // Nothing read yet: both incoming messages count.
+        assert_eq!(app.unread_count(conversation), 2);
+
+        // Reading up to id 1 leaves only the newer incoming message.
+        let key = app.read_key(conversation);
+        app.settings.read_marks.insert(key, 1);
+        assert_eq!(app.unread_count(conversation), 1);
+    }
+
+    #[tokio::test]
+    async fn unread_is_tracked_per_conversation() {
+        use meshtastic_protobufs::meshtastic::channel::Role;
+
+        let mut app = test_app();
+        app.my_node_num = Some(1);
+        app.channels = vec![Channel {
+            index: 0,
+            role: Role::Primary as i32,
+            settings: None,
+        }];
+        app.messages = vec![
+            message(1, 2, u32::MAX, false, "broadcast"),
+            message(2, 3, 1, false, "direct"),
+        ];
+        assert_eq!(app.unread_count(Conversation::Channel(0)), 1);
+        assert_eq!(app.unread_count(Conversation::Peer(3)), 1);
+        assert_eq!(app.total_unread(), 2);
+    }
+
+    #[tokio::test]
+    async fn conversation_for_classifies_messages() {
+        let mut app = test_app();
+        app.my_node_num = Some(1);
+        assert_eq!(
+            app.conversation_for(&message(1, 2, 1, false, "dm")),
+            Some(Conversation::Peer(2))
+        );
+        assert_eq!(
+            app.conversation_for(&message(2, 5, u32::MAX, false, "chan")),
+            Some(Conversation::Channel(0))
+        );
+    }
+
+    #[tokio::test]
+    async fn search_matches_message_text() {
+        let mut app = test_app();
+        app.my_node_num = Some(1);
+        app.messages = vec![
+            message(1, 2, 1, false, "Hello world"),
+            message(2, 3, 1, false, "nothing here"),
+        ];
+
+        app.message_search = "hello".into();
+        let results = app.search_messages();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, 1);
+
+        app.message_search = "nothing".into();
+        assert_eq!(app.search_messages().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn first_history_load_is_marked_read() {
+        let mut app = test_app();
+        app.my_node_num = Some(1);
+        app.messages = vec![message(1, 2, 1, false, "a"), message(2, 2, 1, false, "b")];
+
+        assert!(app.seed_read_marks(), "first load should seed the marks");
+        assert_eq!(app.unread_count(Conversation::Peer(2)), 0);
+        assert!(app.settings.known_history.contains(&1));
+
+        // A later load of the same device must not re-seed.
+        assert!(!app.seed_read_marks());
+    }
+
+    #[tokio::test]
+    async fn advancing_the_read_mark_clears_unread() {
+        let mut app = test_app();
+        app.my_node_num = Some(1);
+        app.messages = vec![message(1, 2, 1, false, "a")];
+        app.conversation = Conversation::Peer(2);
+
+        assert_eq!(app.unread_count(Conversation::Peer(2)), 1);
+        assert!(app.advance_read_mark(), "the mark should move");
+        assert_eq!(app.unread_count(Conversation::Peer(2)), 0);
+        assert!(!app.advance_read_mark(), "nothing new to advance");
     }
 }

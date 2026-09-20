@@ -6,7 +6,8 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mt_core::{
-    ConnectionState, CoreCommand, CoreConfig, CoreEvent, DeviceAddress, MessageStatus, spawn_core,
+    ConnectionState, CoreCommand, CoreConfig, CoreEvent, DeviceAddress, MessageFilter,
+    MessageStatus, spawn_core,
 };
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::timeout;
@@ -260,6 +261,130 @@ async fn mock_handshake_ingest_and_messaging() {
         history
             .iter()
             .any(|m| m.text == "hello from the test" && m.status == MessageStatus::Delivered)
+    );
+
+    core.dispatch(CoreCommand::ShutdownCore).await.unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Wait for a `MessagesLoaded` snapshot satisfying `predicate`.
+async fn wait_history(
+    rx: &mut tokio::sync::broadcast::Receiver<CoreEvent>,
+    predicate: impl Fn(&[mt_core::MessageRecord]) -> bool,
+) -> Vec<mt_core::MessageRecord> {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(CoreEvent::MessagesLoaded(messages)) if predicate(&messages) => {
+                    return messages;
+                }
+                Ok(_) => {}
+                Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => panic!("core event stream closed"),
+            }
+        }
+    })
+    .await
+    .expect("expected a history snapshot")
+}
+
+/// Loading history while idle, then clearing and deleting messages, must all
+/// be persisted to the per-device database.
+#[tokio::test]
+async fn mock_history_load_clear_and_delete() {
+    let dir = temp_dir();
+    let cfg = CoreConfig {
+        data_dir: dir.clone(),
+        handshake_timeout: Duration::from_secs(5),
+        ..CoreConfig::default()
+    };
+    let core = spawn_core(cfg);
+    let mut events = core.subscribe();
+
+    core.connect(DeviceAddress::mock("test")).await.unwrap();
+    let handshake = wait_connected(&mut events).await;
+    let node_num = handshake.node_num;
+
+    // Sending a channel message stores it locally.
+    core.dispatch(CoreCommand::SendText {
+        text: "clear me".into(),
+        channel: 0,
+        to: None,
+        reply_id: None,
+    })
+    .await
+    .unwrap();
+    let stored_id = timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(CoreEvent::Message(record)) = events.recv().await {
+                if record.outgoing && record.text == "clear me" {
+                    return record.id;
+                }
+            }
+        }
+    })
+    .await
+    .expect("outgoing message should be stored");
+
+    // Loading history re-reads the same snapshot (this is the offline path).
+    core.dispatch(CoreCommand::LoadHistory(node_num))
+        .await
+        .unwrap();
+    wait_history(&mut events, |messages| {
+        messages.iter().any(|m| m.id == stored_id)
+    })
+    .await;
+
+    // Clearing the channel drops it from the database and the UI.
+    core.dispatch(CoreCommand::ClearConversation(Box::new(
+        MessageFilter::Channel(0),
+    )))
+    .await
+    .unwrap();
+    let cleared = wait_history(&mut events, |messages| {
+        messages.iter().all(|m| m.id != stored_id)
+    })
+    .await;
+    assert!(cleared.iter().all(|m| m.id != stored_id));
+
+    // A new message can then be deleted individually.
+    core.dispatch(CoreCommand::SendText {
+        text: "delete me".into(),
+        channel: 0,
+        to: None,
+        reply_id: None,
+    })
+    .await
+    .unwrap();
+    let delete_id = timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(CoreEvent::Message(record)) = events.recv().await {
+                if record.outgoing && record.text == "delete me" {
+                    return record.id;
+                }
+            }
+        }
+    })
+    .await
+    .expect("second outgoing message should be stored");
+
+    core.dispatch(CoreCommand::DeleteMessage(delete_id))
+        .await
+        .unwrap();
+    let after_delete = wait_history(&mut events, |messages| {
+        messages.iter().all(|m| m.id != delete_id)
+    })
+    .await;
+    assert!(after_delete.iter().all(|m| m.id != delete_id));
+
+    // The database itself is empty afterwards.
+    let db = mt_persistence::Database::open_for_device(&dir, node_num).unwrap();
+    let remaining = db
+        .list_messages(&mt_persistence::MessageQuery::channel(0, 50))
+        .unwrap();
+    assert!(
+        remaining.is_empty(),
+        "clear + delete should empty the channel: {remaining:?}"
     );
 
     core.dispatch(CoreCommand::ShutdownCore).await.unwrap();

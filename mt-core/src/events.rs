@@ -9,7 +9,7 @@ use meshtastic_protobufs::meshtastic::{
     Channel, Config, DeviceMetadata, ModuleConfig, MyNodeInfo, NodeInfo, Position, QueueStatus,
     SharedContact, Telemetry,
 };
-use mt_persistence::{MessageRecord, MessageStatus};
+use mt_persistence::{MessageFilter, MessageRecord, MessageStatus};
 use mt_transport::DeviceAddress;
 
 /// High level state of the connection, as shown in the UI.
@@ -135,6 +135,13 @@ pub enum CoreCommand {
         /// Set for emoji reactions.
         reply_id: Option<u32>,
     },
+    /// Open the last device's database and emit its history without
+    /// connecting, so the Messages view works offline.
+    LoadHistory(u32),
+    /// Delete one stored message by its local row id.
+    DeleteMessage(i64),
+    /// Forget every message in a conversation.
+    ClearConversation(Box<MessageFilter>),
     /// Ask a node for a position report.
     RequestPosition(u32),
     /// Ask for a traceroute to a node.

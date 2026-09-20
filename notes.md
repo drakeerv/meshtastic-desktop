@@ -17,8 +17,11 @@ Roadmap ideas (roughly priority order):
    attributed to the app icon.
 5. Host integration. (done)
    Device clock on connect, "Fill from host" timezone, GeoClue host location.
-6. Message UX.
-   Cross-message search, per-conversation unread badges, delete/clear conversation.
+6. Message UX. (done)
+   Cross-message search, per-conversation unread badges (persisted per
+   device), clear-conversation and per-message delete (both confirmed).
+   History now loads from the last device's database at startup, so the
+   Messages view works offline and clear/delete persist offline.
 7. Waypoints.
    Receive, plot on the map, and send waypoints.
 8. Remote admin.

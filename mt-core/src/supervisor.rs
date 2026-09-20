@@ -343,6 +343,13 @@ impl Supervisor {
                 reply_id,
             } => self.send_text(text, channel, to, reply_id).await,
 
+            C::LoadHistory(node_num) => {
+                self.open_history_db(node_num);
+                Ok(())
+            }
+            C::DeleteMessage(id) => self.delete_message(id),
+            C::ClearConversation(filter) => self.clear_conversation(&filter),
+
             C::RequestPosition(num) => {
                 self.send_online(mt_protocol::builders::position_request(num))
                     .await
@@ -677,7 +684,32 @@ impl Supervisor {
         }
     }
 
-    fn load_persisted(&mut self) {
+    /// Open the last device's database and emit its cached nodes, channels and
+    /// message history.
+    ///
+    /// This lets the Messages (and Nodes) views, plus clear/delete, work while
+    /// idle, before any transport connection is made.
+    pub(crate) fn open_history_db(&mut self, node_num: u32) {
+        if self.db_node != Some(node_num) || self.db.is_none() {
+            match Database::open_for_device(&self.cfg.data_dir, node_num) {
+                Ok(db) => {
+                    self.db = Some(db);
+                    self.db_node = Some(node_num);
+                }
+                Err(err) => {
+                    self.emit(CoreEvent::Error(format!(
+                        "failed to open the device database: {err}"
+                    )));
+                    return;
+                }
+            }
+        }
+        self.load_nodes_and_channels();
+        self.emit_history();
+    }
+
+    /// Load the cached node database and channel slots into memory.
+    fn load_nodes_and_channels(&mut self) {
         let Some(db) = self.db.clone() else {
             return;
         };
@@ -698,6 +730,51 @@ impl Supervisor {
                 self.emit(CoreEvent::Channel(Box::new(channel)));
             }
         }
+    }
+
+    /// Re-emit the open device's stored message history.
+    fn emit_history(&mut self) {
+        let Some(db) = self.db.clone() else {
+            return;
+        };
+        let query = MessageQuery {
+            filter: MessageFilter::All,
+            limit: self.cfg.history_page,
+            before_id: None,
+        };
+        match db.list_messages(&query) {
+            Ok(messages) => self.emit(CoreEvent::MessagesLoaded(messages)),
+            Err(err) => self.emit(CoreEvent::Error(format!("reading messages failed: {err}"))),
+        }
+    }
+
+    /// Delete one stored message and refresh the history in the UI.
+    fn delete_message(&mut self, id: i64) -> Result<()> {
+        let Some(db) = self.db.clone() else {
+            return Err(CoreError::NotConnected);
+        };
+        db.delete_message(id)?;
+        self.emit_history();
+        Ok(())
+    }
+
+    /// Forget every message in a conversation and refresh the UI.
+    fn clear_conversation(&mut self, filter: &MessageFilter) -> Result<()> {
+        let Some(db) = self.db.clone() else {
+            return Err(CoreError::NotConnected);
+        };
+        db.clear_conversation(filter)?;
+        self.emit_history();
+        Ok(())
+    }
+
+    fn load_persisted(&mut self) {
+        let Some(db) = self.db.clone() else {
+            return;
+        };
+
+        self.load_nodes_and_channels();
+
         if let Ok(configs) = db.list_configs() {
             for config in configs {
                 self.state.apply_config(config.clone());
@@ -711,15 +788,7 @@ impl Supervisor {
             }
         }
 
-        let query = MessageQuery {
-            filter: MessageFilter::All,
-            limit: self.cfg.history_page,
-            before_id: None,
-        };
-        match db.list_messages(&query) {
-            Ok(messages) => self.emit(CoreEvent::MessagesLoaded(messages)),
-            Err(err) => self.emit(CoreEvent::Error(format!("reading messages failed: {err}"))),
-        }
+        self.emit_history();
     }
 
     /// Handle a `config_complete_id` sentinel, driving the two-stage handshake.

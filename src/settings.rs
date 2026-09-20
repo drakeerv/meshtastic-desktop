@@ -2,6 +2,7 @@
 //! config directory. Per-device data lives in SQLite (`mt-persistence`);
 //! this file only holds client preferences.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -61,6 +62,14 @@ pub struct AppSettings {
     pub high_contrast: bool,
     /// Interface scale factor applied to the whole window (1.0 is default).
     pub ui_scale: f32,
+    /// Node number of the last connected device, used to show its message
+    /// history offline and to key unread state.
+    pub last_node_num: Option<u32>,
+    /// Last-read message id per conversation, keyed `"<node>:<conversation>"`.
+    pub read_marks: HashMap<String, i64>,
+    /// Device node numbers whose history has already been seen, so the first
+    /// load of a device's history is treated as read.
+    pub known_history: Vec<u32>,
 }
 
 impl Default for AppSettings {
@@ -78,6 +87,9 @@ impl Default for AppSettings {
             close_to_tray: true,
             high_contrast: false,
             ui_scale: 1.0,
+            last_node_num: None,
+            read_marks: HashMap::new(),
+            known_history: Vec::new(),
         }
     }
 }

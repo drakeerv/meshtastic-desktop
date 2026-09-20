@@ -1,7 +1,7 @@
 //! The left navigation rail.
 
 use iced::widget::{Space, button, column, container, text};
-use iced::{Alignment, Border, Element, Length, Padding};
+use iced::{Alignment, Border, Color, Element, Length, Padding};
 
 use crate::app::{App, Message, Tab};
 use crate::icons::lucide;
@@ -61,11 +61,53 @@ fn nav_item<'a>(app: &App, tab: Tab) -> Element<'a, Message> {
     } else {
         theme::text_muted()
     };
+
+    let mut icon: Element<'static, Message> = container(glyph.size(19).color(color))
+        .width(Length::Fill)
+        .height(Length::Fixed(22.0))
+        .center_x(Length::Fill)
+        .center_y(Length::Fixed(22.0))
+        .into();
+
+    let unread = if tab == Tab::Messages {
+        app.total_unread()
+    } else {
+        0
+    };
+    if unread > 0 {
+        let badge = container(
+            text(unread.min(99).to_string())
+                .size(9)
+                .color(Color::from_rgb8(9, 20, 14)),
+        )
+        .padding(Padding::from([0, 4]))
+        .style(|_: &iced::Theme| iced::widget::container::Style {
+            background: Some(theme::primary().into()),
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: 999.0.into(),
+            },
+            ..Default::default()
+        });
+
+        icon = iced::widget::stack![
+            icon,
+            container(badge)
+                .width(Length::Fill)
+                .height(Length::Fixed(22.0))
+                .align_x(Alignment::End)
+                .align_y(Alignment::Start)
+                .padding(Padding::from([0, 12])),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fixed(22.0))
+        .into();
+    }
+
     button(
         column![
-            container(glyph.size(19).color(color))
-                .width(Length::Fill)
-                .center_x(Length::Fill),
+            icon,
             text(tab.label()).size(10).center().width(Length::Fill),
         ]
         .spacing(2)

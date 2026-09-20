@@ -3,11 +3,12 @@
 use iced::widget::{Space, button, column, container, markdown, row, scrollable, text, text_input};
 use iced::{Alignment, Border, Color, Element, Length, Padding, Theme};
 
-use crate::app::{App, Conversation, Message};
+use crate::app::{App, ConfirmAction, Conversation, Message};
 use crate::format;
 use crate::icons::lucide;
 use crate::security;
 use crate::theme;
+use crate::views::dialog;
 use crate::widgets;
 use mt_persistence::{MessageRecord, MessageStatus};
 
@@ -24,6 +25,57 @@ pub fn view(app: &App) -> Element<'_, Message> {
 // Sidebar
 
 fn sidebar(app: &App) -> Element<'_, Message> {
+    let body = if app.message_search.trim().is_empty() {
+        conversation_list(app)
+    } else {
+        search_results(app)
+    };
+
+    container(
+        column![
+            sidebar_search(app),
+            widgets::divider(),
+            container(scrollable(container(body).padding(Padding::from(10))).height(Length::Fill))
+                .height(Length::Fill),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill),
+    )
+    .width(268)
+    .height(Length::Fill)
+    .style(theme::panel)
+    .into()
+}
+
+/// The search box above the conversation list.
+fn sidebar_search(app: &App) -> Element<'_, Message> {
+    let mut row = row![
+        text_input("Search messages…", &app.message_search)
+            .on_input(Message::SearchQueryChanged)
+            .style(theme::text_input_style)
+            .padding(Padding::from([8, 12]))
+            .size(13)
+            .width(Length::Fill),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
+    if !app.message_search.is_empty() {
+        row = row.push(
+            button(lucide::x().size(14).color(theme::text_muted()))
+                .padding(Padding::from([6, 8]))
+                .style(theme::ghost_button)
+                .on_press(Message::SearchQueryChanged(String::new())),
+        );
+    }
+
+    container(row)
+        .width(Length::Fill)
+        .padding(Padding::from([10, 10]))
+        .into()
+}
+
+fn conversation_list(app: &App) -> Element<'_, Message> {
     let mut list = column![].spacing(2).width(Length::Fill);
 
     list = list.push(section_label("CHANNELS"));
@@ -67,15 +119,80 @@ fn sidebar(app: &App) -> Element<'_, Message> {
         }
     }
 
-    container(scrollable(list.padding(Padding::from(10))).height(Length::Fill))
-        .width(268)
-        .height(Length::Fill)
-        .style(theme::panel)
-        .into()
+    list.into()
 }
 
-fn section_label(title: &str) -> Element<'_, Message> {
-    container(text(title).size(11).color(theme::text_faint()))
+/// Cross-conversation search results, newest first.
+fn search_results(app: &App) -> Element<'_, Message> {
+    let matches = app.search_messages();
+    if matches.is_empty() {
+        return widgets::empty_state(
+            lucide::search().size(38).color(theme::text_faint()).into(),
+            "No matches",
+            "No messages match your search.",
+        );
+    }
+
+    let mut list = column![].spacing(2).width(Length::Fill);
+    let label = if matches.len() == 1 {
+        "1 MATCH".to_string()
+    } else {
+        format!("{} MATCHES", matches.len())
+    };
+    list = list.push(section_label(label));
+    for record in matches {
+        list = list.push(search_result_item(app, record));
+    }
+    list.into()
+}
+
+fn search_result_item<'a>(app: &'a App, record: &'a MessageRecord) -> Element<'a, Message> {
+    let conversation = app.conversation_for(record);
+    let title = conversation
+        .map(|conversation| app.conversation_name(conversation))
+        .unwrap_or_else(|| "Unknown".to_string());
+    let sender = app.node_name(record.from);
+
+    let content = column![
+        row![
+            text(title).size(12).color(theme::primary_dim()),
+            Space::new().width(Length::Fill),
+            text(format::last_heard_short(
+                record.sent_at.max(0) as u32,
+                app.now
+            ))
+            .size(10)
+            .color(theme::text_faint()),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+        column![
+            text(sender).size(11).color(theme::text_muted()),
+            text(truncate(&record.text.replace(['\n', '\r'], " "), 44))
+                .size(11)
+                .color(theme::text()),
+        ]
+        .spacing(1),
+    ]
+    .spacing(3)
+    .width(Length::Fill);
+
+    match conversation {
+        Some(conversation) => button(content)
+            .width(Length::Fill)
+            .padding(Padding::from([8, 10]))
+            .style(theme::nav_button(false))
+            .on_press(Message::OpenSearchResult(conversation))
+            .into(),
+        None => container(content)
+            .width(Length::Fill)
+            .padding(Padding::from([8, 10]))
+            .into(),
+    }
+}
+
+fn section_label(title: impl Into<String>) -> Element<'static, Message> {
+    container(text(title.into()).size(11).color(theme::text_faint()))
         .width(Length::Fill)
         .padding(Padding::from([6, 8]))
         .into()
@@ -116,12 +233,16 @@ fn conversation_item(
         ),
         None => ("No messages".to_string(), String::new()),
     };
+    let unread = app.unread_count(conversation);
 
     let mut title_row = row![text(title).size(14).color(theme::text())]
         .spacing(6)
         .align_y(Alignment::Center);
     if let Some(badge) = badge {
         title_row = title_row.push(badge);
+    }
+    if unread > 0 {
+        title_row = title_row.push(unread_badge(unread));
     }
     title_row = title_row
         .push(Space::new().width(Length::Fill))
@@ -143,6 +264,26 @@ fn conversation_item(
     .padding(Padding::from([8, 10]))
     .style(theme::nav_button(selected))
     .on_press(on_press)
+    .into()
+}
+
+/// A small filled pill showing a conversation's unread count.
+fn unread_badge(count: usize) -> Element<'static, Message> {
+    container(
+        text(count.min(99).to_string())
+            .size(10)
+            .color(Color::from_rgb8(9, 20, 14)),
+    )
+    .padding(Padding::from([1, 6]))
+    .style(|_: &Theme| iced::widget::container::Style {
+        background: Some(theme::primary().into()),
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: 999.0.into(),
+        },
+        ..Default::default()
+    })
     .into()
 }
 
@@ -244,6 +385,15 @@ fn conversation_header(app: &App) -> Element<'_, Message> {
             (node_avatar(app, peer), app.node_name(peer), subtitle)
         }
     };
+
+    if app.latest_message(app.conversation).is_some() {
+        trailing = trailing.push(
+            button(lucide::trash().size(14).color(theme::text_muted()))
+                .padding(Padding::from([6, 8]))
+                .style(theme::ghost_button)
+                .on_press(Message::RequestClearConversation),
+        );
+    }
 
     container(
         row![
@@ -385,6 +535,13 @@ fn message_bubble<'a>(app: &'a App, record: &'a MessageRecord) -> Element<'a, Me
             .padding(Padding::from([2, 4]))
             .style(theme::ghost_button)
             .on_press(Message::CopyText(body.clone())),
+    );
+
+    meta = meta.push(
+        button(lucide::trash().size(12).color(theme::text_faint()))
+            .padding(Padding::from([2, 4]))
+            .style(theme::ghost_button)
+            .on_press(Message::RequestDelete(record.id)),
     );
 
     let bubble = container(column![body_element, meta].spacing(5).align_x(if outgoing {
@@ -584,4 +741,49 @@ fn compose(app: &App) -> Element<'_, Message> {
     .width(Length::Fill)
     .padding(Padding::from([10, 18]))
     .into()
+}
+
+/// The confirmation dialog for a pending destructive action.
+pub fn confirm_overlay(app: &App) -> Option<Element<'_, Message>> {
+    let action = app.pending_confirm?;
+
+    let (title, body) = match action {
+        ConfirmAction::ClearConversation(conversation) => (
+            "Clear conversation".to_string(),
+            format!(
+                "Permanently delete every message in {}? This cannot be undone.",
+                app.conversation_name(conversation)
+            ),
+        ),
+        ConfirmAction::DeleteMessage { .. } => (
+            "Delete message".to_string(),
+            "Permanently delete this message? This cannot be undone.".to_string(),
+        ),
+    };
+
+    Some(dialog::scrim(dialog::card(
+        column![
+            row![
+                lucide::triangle_alert().size(18).color(theme::danger()),
+                text(title).size(17).color(theme::text()),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            text(body).size(12).color(theme::text_muted()),
+            row![
+                Space::new().width(Length::Fill),
+                button(text("Cancel").size(13))
+                    .padding(Padding::from([8, 14]))
+                    .style(theme::secondary_button)
+                    .on_press(Message::CancelPending),
+                button(text("Delete").size(13))
+                    .padding(Padding::from([8, 14]))
+                    .style(theme::danger_button)
+                    .on_press(Message::ConfirmPending),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(14),
+    )))
 }
