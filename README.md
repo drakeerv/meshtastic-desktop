@@ -50,8 +50,9 @@ desktop app.
 - The device clock is set from this computer on every connect.
 - "Fill from host" reads the computer's timezone (converting the IANA zone to
   the POSIX `tzdef` the firmware expects) and sends it to the device.
-- "Use host location" reads a position from GeoClue2 and sets it as the
-  device's fixed position.
+- "Use host location" tries GeoClue2, then gpsd, then (opt-in) a city-level IP
+  lookup, and sets the result as the device's fixed position. Coordinates can
+  also be entered by hand.
 
 ## Building
 
@@ -107,9 +108,12 @@ cargo run --release
   scripts/install-desktop.sh
   ```
 
-- **Host location**: the Settings → Device "Use host location" action needs
-  GeoClue2 on the system bus (the `geoclue` package on most distributions). If
-  GeoClue refuses the request, add a GeoClue agent configuration for the app.
+- **Host location**: "Use host location" tries **GeoClue2** (the `geoclue`
+  package) and **gpsd** (with a USB/serial GPS) first. On Arch, GeoClue may
+  need an allow-list entry in `/etc/geoclue/conf.d/` for
+  `org.meshtastic.Meshtastic`. The opt-in **IP fallback** needs no setup but is
+  city-level and shares your public IP with a third-party service. Manual
+  latitude/longitude entry always works.
 
 ## Workspace layout
 

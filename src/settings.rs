@@ -53,6 +53,8 @@ pub struct AppSettings {
     pub imperial: bool,
     /// Draw the optional online OpenStreetMap tile layer on the map.
     pub online_tiles: bool,
+    /// Allow the IP-based location fallback when GeoClue and gpsd are absent.
+    pub use_ip_location: bool,
 }
 
 impl Default for AppSettings {
@@ -66,6 +68,7 @@ impl Default for AppSettings {
             scan_ble_on_start: false,
             imperial: false,
             online_tiles: false,
+            use_ip_location: false,
         }
     }
 }

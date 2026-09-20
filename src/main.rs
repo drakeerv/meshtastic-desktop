@@ -12,6 +12,7 @@ mod format;
 mod geoclue;
 mod host;
 mod icons;
+mod location;
 mod map;
 mod security;
 mod settings;

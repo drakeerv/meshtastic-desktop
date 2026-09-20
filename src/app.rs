@@ -267,7 +267,13 @@ pub enum Message {
     /// fixed position.
     UseHostLocation,
     /// The outcome of [`Message::UseHostLocation`].
-    HostLocationReady(Result<crate::geoclue::Fix, String>),
+    HostLocationReady(Result<crate::location::Fix, String>),
+    /// Allow the IP-based location fallback.
+    ToggleIpLocation(bool),
+    /// Manual fixed position, in decimal degrees.
+    ManualLatChanged(String),
+    ManualLonChanged(String),
+    SetManualPosition,
     OwnerLongChanged(String),
     OwnerShortChanged(String),
     SaveOwner,
@@ -359,6 +365,9 @@ pub struct App {
     // settings view
     pub owner_long: String,
     pub owner_short: String,
+    /// Manual fixed position input, in decimal degrees.
+    pub manual_lat: String,
+    pub manual_lon: String,
 
     pub now: i64,
     pub system_mode: Option<iced::theme::Mode>,
@@ -424,6 +433,8 @@ impl App {
             tile_permits: Arc::new(tokio::sync::Semaphore::new(tiles::MAX_CONCURRENT_REQUESTS)),
             owner_long: String::new(),
             owner_short: String::new(),
+            manual_lat: String::new(),
+            manual_lon: String::new(),
             now: mt_persistence::now_unix(),
             system_mode: None,
         };
@@ -705,6 +716,41 @@ impl App {
         Task::batch(tasks)
     }
 
+    /// Parse the manual position fields and send them as the fixed position.
+    fn set_manual_position(&mut self) {
+        let latitude: f64 = match self.manual_lat.trim().parse() {
+            Ok(value) => value,
+            Err(_) => {
+                self.push_notice("latitude must be a decimal number");
+                return;
+            }
+        };
+        let longitude: f64 = match self.manual_lon.trim().parse() {
+            Ok(value) => value,
+            Err(_) => {
+                self.push_notice("longitude must be a decimal number");
+                return;
+            }
+        };
+        if !(-90.0..=90.0).contains(&latitude) || !(-180.0..=180.0).contains(&longitude) {
+            self.push_notice("coordinates out of range (lat -90..90, lon -180..180)");
+            return;
+        }
+        let position = Position {
+            latitude_i: Some((latitude * 1e7) as i32),
+            longitude_i: Some((longitude * 1e7) as i32),
+            time: mt_persistence::now_unix() as u32,
+            ..Default::default()
+        };
+        let _ = self
+            .bridge
+            .core()
+            .try_dispatch(CoreCommand::SetFixedPosition(position));
+        self.push_notice(format!(
+            "manual position sent: {latitude:.5}, {longitude:.5}"
+        ));
+    }
+
     // update
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -968,7 +1014,12 @@ impl App {
             }
             Message::UseHostLocation => {
                 self.push_notice("asking the host for a location");
-                return Task::perform(crate::geoclue::locate(), Message::HostLocationReady);
+                let client = self.http.clone();
+                let allow_ip = self.settings.use_ip_location;
+                return Task::perform(
+                    crate::location::locate(client, allow_ip),
+                    Message::HostLocationReady,
+                );
             }
             Message::HostLocationReady(Ok(fix)) => {
                 let position = Position {
@@ -983,13 +1034,13 @@ impl App {
                     .try_dispatch(CoreCommand::SetFixedPosition(position));
                 let fix_note = if fix.accuracy > 0.0 {
                     format!(
-                        "host location sent: {:.5}, {:.5} (±{:.0} m)",
-                        fix.latitude, fix.longitude, fix.accuracy
+                        "{} location sent: {:.5}, {:.5} (±{:.0} m)",
+                        fix.source, fix.latitude, fix.longitude, fix.accuracy
                     )
                 } else {
                     format!(
-                        "host location sent: {:.5}, {:.5}",
-                        fix.latitude, fix.longitude
+                        "{} location sent: {:.5}, {:.5}",
+                        fix.source, fix.latitude, fix.longitude
                     )
                 };
                 self.push_notice(fix_note);
@@ -997,6 +1048,13 @@ impl App {
             Message::HostLocationReady(Err(error)) => {
                 self.push_notice(format!("host location failed: {error}"));
             }
+            Message::ToggleIpLocation(value) => {
+                self.settings.use_ip_location = value;
+                self.settings.save();
+            }
+            Message::ManualLatChanged(value) => self.manual_lat = value,
+            Message::ManualLonChanged(value) => self.manual_lon = value,
+            Message::SetManualPosition => self.set_manual_position(),
             Message::OwnerLongChanged(value) => self.owner_long = value,
             Message::OwnerShortChanged(value) => self.owner_short = value,
             Message::SaveOwner => {

@@ -92,7 +92,8 @@ tokio-serial = "5.5"
 serialport = "4.10"
 mdns-sd = "0.21"
 
-# HTTP, used only for the optional online map tile layer (OpenStreetMap).
+# HTTP, used only for the optional online map tile layer (OpenStreetMap) and
+# the optional IP-based location fallback.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 # Desktop integration

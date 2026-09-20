@@ -462,7 +462,7 @@ fn device_page(app: &App) -> Element<'_, Message> {
             ),
             setting_row(
                 "Location",
-                "Use this computer's location as the device's fixed position. Needs GeoClue2 on the system bus.",
+                "Use this computer's location as the device's fixed position. Tries GeoClue2, then gpsd.",
                 action_button(
                     lucide::locate_fixed()
                         .size(14)
@@ -476,6 +476,47 @@ fn device_page(app: &App) -> Element<'_, Message> {
                     connected,
                     Message::UseHostLocation,
                 ),
+            ),
+            setting_row(
+                "Allow IP-based location",
+                "If GeoClue2 and gpsd are unavailable, fall back to a city-level fix from an IP lookup service. This shares the public IP with a third party.",
+                checkbox(app.settings.use_ip_location)
+                    .on_toggle(Message::ToggleIpLocation)
+                    .into(),
+            ),
+            setting_row(
+                "Manual position",
+                "Set the fixed position by hand, in decimal degrees.",
+                row![
+                    text_input("Latitude", &app.manual_lat)
+                        .on_input(Message::ManualLatChanged)
+                        .style(theme::text_input_style)
+                        .padding(Padding::from([9, 12]))
+                        .size(13)
+                        .width(Length::Fixed(104.0)),
+                    text_input("Longitude", &app.manual_lon)
+                        .on_input(Message::ManualLonChanged)
+                        .style(theme::text_input_style)
+                        .padding(Padding::from([9, 12]))
+                        .size(13)
+                        .width(Length::Fixed(104.0)),
+                    action_button(
+                        lucide::map_pin()
+                            .size(14)
+                            .color(if connected {
+                                theme::text()
+                            } else {
+                                theme::text_faint()
+                            })
+                            .into(),
+                        "Set",
+                        connected,
+                        Message::SetManualPosition,
+                    ),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .into(),
             ),
         ]
         .spacing(12)
