@@ -421,6 +421,67 @@ fn device_page(app: &App) -> Element<'_, Message> {
         .into(),
     ));
 
+    // Host integration: push this computer's timezone, clock and location to
+    // the device.
+    body = body.push(section(
+        "Host integration",
+        column![
+            setting_row(
+                "Timezone",
+                "Read this computer's timezone and send it to the device.",
+                action_button(
+                    lucide::globe()
+                        .size(14)
+                        .color(if connected {
+                            theme::text()
+                        } else {
+                            theme::text_faint()
+                        })
+                        .into(),
+                    "Fill from host",
+                    connected,
+                    Message::FillTimezoneFromHost,
+                ),
+            ),
+            setting_row(
+                "Device clock",
+                "Send this computer's clock to the device. This also happens on every connect.",
+                action_button(
+                    lucide::timer()
+                        .size(14)
+                        .color(if connected {
+                            theme::text()
+                        } else {
+                            theme::text_faint()
+                        })
+                        .into(),
+                    "Set clock",
+                    connected,
+                    Message::SyncClockFromHost,
+                ),
+            ),
+            setting_row(
+                "Location",
+                "Use this computer's location as the device's fixed position. Needs GeoClue2 on the system bus.",
+                action_button(
+                    lucide::locate_fixed()
+                        .size(14)
+                        .color(if connected {
+                            theme::text()
+                        } else {
+                            theme::text_faint()
+                        })
+                        .into(),
+                    "Use host location",
+                    connected,
+                    Message::UseHostLocation,
+                ),
+            ),
+        ]
+        .spacing(12)
+        .into(),
+    ));
+
     // Diagnostics.
     let copy_logs = {
         let mut button = button(widgets::labelled(

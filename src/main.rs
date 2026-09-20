@@ -9,6 +9,8 @@ mod assets;
 mod bridge;
 mod config_editor;
 mod format;
+mod geoclue;
+mod host;
 mod icons;
 mod map;
 mod security;

@@ -438,6 +438,18 @@ impl Supervisor {
                 );
                 self.apply_admin_edit(msg).await
             }
+            C::SetTime(seconds) => {
+                self.send_to_radio(mt_protocol::builders::set_time_only(seconds))
+                    .await
+            }
+            C::SetFixedPosition(position) => {
+                let msg = self.admin_radio(
+                    admin_message::PayloadVariant::SetFixedPosition(position),
+                    false,
+                    mt_protocol::constants::BROADCAST_ADDR,
+                );
+                self.apply_admin_edit(msg).await
+            }
 
             C::Resync => {
                 self.handshake_complete = false;

@@ -34,6 +34,7 @@ iced_fonts.workspace = true
 ksni.workspace = true
 notify-rust.workspace = true
 meshtastic_protobufs.workspace = true
+zbus.workspace = true
 
 [workspace]
 members = ["mt-protocol", "mt-transport", "mt-persistence", "mt-core"]

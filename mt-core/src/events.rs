@@ -161,6 +161,10 @@ pub enum CoreCommand {
     SetConfig(Box<Config>),
     /// Apply a module config section.
     SetModuleConfig(Box<ModuleConfig>),
+    /// Set the device clock to the given Unix time, in seconds.
+    SetTime(u32),
+    /// Set the device's fixed position, e.g. from the host's location.
+    SetFixedPosition(Position),
     /// Re-run the config handshake with the current device.
     Resync,
     /// Change the automatic-reconnect preference at runtime.

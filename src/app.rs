@@ -257,6 +257,17 @@ pub enum Message {
     ToggleSendOnEnter(bool),
     ToggleScanOnStart(bool),
     ToggleImperial(bool),
+
+    // host integration
+    /// Send this computer's timezone to the device (`DeviceConfig.tzdef`).
+    FillTimezoneFromHost,
+    /// Send this computer's clock to the device.
+    SyncClockFromHost,
+    /// Ask GeoClue for this computer's location and use it as the device's
+    /// fixed position.
+    UseHostLocation,
+    /// The outcome of [`Message::UseHostLocation`].
+    HostLocationReady(Result<crate::geoclue::Fix, String>),
     OwnerLongChanged(String),
     OwnerShortChanged(String),
     SaveOwner,
@@ -924,6 +935,67 @@ impl App {
             Message::ToggleImperial(value) => {
                 self.settings.imperial = value;
                 self.settings.save();
+            }
+
+            Message::FillTimezoneFromHost => {
+                match crate::host::posix_tzdef() {
+                    Some(tzdef) => {
+                        // Preserve every other device field and only replace tzdef.
+                        let mut device = self
+                        .device_configs
+                        .iter()
+                        .find_map(|config| match &config.payload_variant {
+                            Some(
+                                meshtastic_protobufs::meshtastic::config::PayloadVariant::Device(device),
+                            ) => Some(device.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                        device.tzdef = tzdef.clone();
+                        self.apply_config_value(SectionValue::Device(device));
+                        self.push_notice(format!("timezone sent from host: {tzdef}"));
+                    }
+                    None => self.push_notice("could not determine the host timezone"),
+                }
+            }
+            Message::SyncClockFromHost => {
+                let seconds = mt_persistence::now_unix() as u32;
+                let _ = self
+                    .bridge
+                    .core()
+                    .try_dispatch(CoreCommand::SetTime(seconds));
+                self.push_notice("device clock set from host");
+            }
+            Message::UseHostLocation => {
+                self.push_notice("asking the host for a location");
+                return Task::perform(crate::geoclue::locate(), Message::HostLocationReady);
+            }
+            Message::HostLocationReady(Ok(fix)) => {
+                let position = Position {
+                    latitude_i: Some((fix.latitude * 1e7) as i32),
+                    longitude_i: Some((fix.longitude * 1e7) as i32),
+                    time: mt_persistence::now_unix() as u32,
+                    ..Default::default()
+                };
+                let _ = self
+                    .bridge
+                    .core()
+                    .try_dispatch(CoreCommand::SetFixedPosition(position));
+                let fix_note = if fix.accuracy > 0.0 {
+                    format!(
+                        "host location sent: {:.5}, {:.5} (±{:.0} m)",
+                        fix.latitude, fix.longitude, fix.accuracy
+                    )
+                } else {
+                    format!(
+                        "host location sent: {:.5}, {:.5}",
+                        fix.latitude, fix.longitude
+                    )
+                };
+                self.push_notice(fix_note);
+            }
+            Message::HostLocationReady(Err(error)) => {
+                self.push_notice(format!("host location failed: {error}"));
             }
             Message::OwnerLongChanged(value) => self.owner_long = value,
             Message::OwnerShortChanged(value) => self.owner_short = value,

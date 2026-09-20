@@ -45,6 +45,14 @@ desktop app.
 - App settings: theme (dark/light/system), units, notifications, send-on-Enter,
   scan-on-start, and the online tile layer.
 
+**Host integration**
+
+- The device clock is set from this computer on every connect.
+- "Fill from host" reads the computer's timezone (converting the IANA zone to
+  the POSIX `tzdef` the firmware expects) and sends it to the device.
+- "Use host location" reads a position from GeoClue2 and sets it as the
+  device's fixed position.
+
 ## Building
 
 Prerequisites:
@@ -98,6 +106,10 @@ cargo run --release
   ```sh
   scripts/install-desktop.sh
   ```
+
+- **Host location**: the Settings → Device "Use host location" action needs
+  GeoClue2 on the system bus (the `geoclue` package on most distributions). If
+  GeoClue refuses the request, add a GeoClue agent configuration for the app.
 
 ## Workspace layout
 
