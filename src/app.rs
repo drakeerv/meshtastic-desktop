@@ -285,6 +285,26 @@ pub enum Message {
     CloseRequested(window::Id),
     /// Hide to the tray instead of quitting when the window is closed.
     ToggleCloseToTray(bool),
+
+    // accessibility
+    /// Escape: close the topmost dialog, or clear the selection.
+    EscapePressed,
+    /// Focus the node search box.
+    FocusSearch,
+    /// Focus the message composer.
+    FocusCompose,
+    /// Move keyboard focus to the next focusable widget.
+    FocusNext,
+    /// Move keyboard focus to the previous focusable widget.
+    FocusPrevious,
+    /// Boost contrast of borders and secondary text.
+    ToggleHighContrast(bool),
+    /// Update the in-progress interface scale while the slider is dragged.
+    UiScalePreview(f32),
+    /// Commit the dragged interface scale and persist it.
+    UiScaleCommitted,
+    /// Quit the application.
+    Quit,
     OwnerLongChanged(String),
     OwnerShortChanged(String),
     SaveOwner,
@@ -376,6 +396,8 @@ pub struct App {
     // settings view
     pub owner_long: String,
     pub owner_short: String,
+    /// In-progress interface scale while the slider is being dragged.
+    pub ui_scale_draft: f32,
     /// Manual fixed position input, in decimal degrees.
     pub manual_lat: String,
     pub manual_lon: String,
@@ -404,6 +426,7 @@ impl App {
             Tab::Connect
         };
         let online_tiles = settings.online_tiles;
+        let ui_scale_draft = settings.ui_scale;
         // A daemon starts with no window; open the main one here.
         let (window_id, open_window) = iced::window::open(crate::window_settings());
         let app = Self {
@@ -453,6 +476,7 @@ impl App {
             tile_permits: Arc::new(tokio::sync::Semaphore::new(tiles::MAX_CONCURRENT_REQUESTS)),
             owner_long: String::new(),
             owner_short: String::new(),
+            ui_scale_draft,
             manual_lat: String::new(),
             manual_lon: String::new(),
             now: mt_persistence::now_unix(),
@@ -491,6 +515,11 @@ impl App {
             ThemePref::Light => true,
             ThemePref::System => self.system_mode == Some(iced::theme::Mode::Light),
         }
+    }
+
+    /// The interface scale factor, clamped to a usable range.
+    pub fn ui_scale(&self) -> f32 {
+        self.settings.ui_scale.clamp(0.75, 2.0)
     }
 
     /// The palette currently in effect.
@@ -776,6 +805,20 @@ impl App {
         self.push_notice(format!(
             "manual position sent: {latitude:.5}, {longitude:.5}"
         ));
+    }
+
+    /// Close the topmost dismissible UI, or clear the node selection.
+    fn escape_pressed(&mut self) {
+        if self.contact_import.is_some() {
+            self.contact_import = None;
+        } else if self.contact_qr.is_some() {
+            self.contact_qr = None;
+        } else if self.editor.is_some() || self.channel_editor.is_some() {
+            self.editor = None;
+            self.channel_editor = None;
+        } else if self.selected_node.is_some() {
+            self.selected_node = None;
+        }
     }
 
     // tray
@@ -1174,6 +1217,28 @@ impl App {
                 self.settings.close_to_tray = value;
                 self.settings.save();
             }
+
+            Message::EscapePressed => self.escape_pressed(),
+            Message::FocusSearch => {
+                self.tab = Tab::Nodes;
+                return iced::widget::operation::focus(crate::views::nodes::SEARCH_INPUT_ID);
+            }
+            Message::FocusCompose => {
+                self.tab = Tab::Messages;
+                return iced::widget::operation::focus(crate::views::messages::COMPOSE_INPUT_ID);
+            }
+            Message::FocusNext => return iced::widget::operation::focus_next(),
+            Message::FocusPrevious => return iced::widget::operation::focus_previous(),
+            Message::ToggleHighContrast(value) => {
+                self.settings.high_contrast = value;
+                self.settings.save();
+            }
+            Message::UiScalePreview(value) => self.ui_scale_draft = value,
+            Message::UiScaleCommitted => {
+                self.settings.ui_scale = self.ui_scale_draft;
+                self.settings.save();
+            }
+            Message::Quit => return iced::exit(),
             Message::OwnerLongChanged(value) => self.owner_long = value,
             Message::OwnerShortChanged(value) => self.owner_short = value,
             Message::SaveOwner => {
@@ -1771,6 +1836,7 @@ impl App {
             iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::Tick),
             iced::system::theme_changes().map(Message::SystemTheme),
             iced::window::close_requests().map(Message::CloseRequested),
+            iced::event::listen_with(keyboard_shortcuts),
         ];
         // When "send on Enter" is off, the compose box has no submit handler,
         // so listen for Ctrl+Enter ourselves while the Messages tab is open.
@@ -1792,6 +1858,7 @@ impl App {
         // Publish the palette for this frame so view-time colour accessors
         // resolve to the right mode.
         theme::set_light_mode(self.is_light());
+        theme::set_high_contrast(self.settings.high_contrast);
 
         let content = match self.tab {
             Tab::Messages => views::messages::view(self),
@@ -1941,6 +2008,53 @@ fn send_on_ctrl_enter(
         }
     }
     None
+}
+
+/// Global keyboard shortcuts.
+///
+/// The event must be unhandled (`Ignored`) so that typing in a focused text
+/// field is never hijacked. These shortcuts are how a keyboard-only user
+/// reaches the app's main actions, since iced does not make buttons focusable.
+fn keyboard_shortcuts(
+    event: iced::event::Event,
+    status: iced::event::Status,
+    _window: window::Id,
+) -> Option<Message> {
+    if status != iced::event::Status::Ignored {
+        return None;
+    }
+
+    let iced::event::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event
+    else {
+        return None;
+    };
+
+    match key {
+        keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::EscapePressed),
+        keyboard::Key::Named(keyboard::key::Named::Tab) => {
+            if modifiers.shift() {
+                Some(Message::FocusPrevious)
+            } else {
+                Some(Message::FocusNext)
+            }
+        }
+        keyboard::Key::Character(character) if modifiers.control() => {
+            match character.to_lowercase().as_str() {
+                "1" => Some(Message::SelectTab(Tab::Messages)),
+                "2" => Some(Message::SelectTab(Tab::Nodes)),
+                "3" => Some(Message::SelectTab(Tab::Map)),
+                "4" => Some(Message::SelectTab(Tab::Connect)),
+                "5" => Some(Message::SelectTab(Tab::Settings)),
+                "f" => Some(Message::FocusSearch),
+                "m" => Some(Message::FocusCompose),
+                "r" => Some(Message::ResyncPressed),
+                "q" => Some(Message::Quit),
+                "," => Some(Message::SelectTab(Tab::Settings)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -2146,5 +2260,94 @@ mod tests {
 
         let _ = app.update(Message::CloseContactShare);
         assert!(app.contact_qr.is_none());
+    }
+
+    /// Build a key-press event for shortcut tests.
+    fn press(key: keyboard::Key, modifiers: keyboard::Modifiers) -> iced::event::Event {
+        iced::event::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        })
+    }
+
+    fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Message> {
+        keyboard_shortcuts(
+            press(key, modifiers),
+            iced::event::Status::Ignored,
+            window::Id::unique(),
+        )
+    }
+
+    #[test]
+    fn control_shortcuts_switch_tabs_and_focus() {
+        let ctrl = keyboard::Modifiers::CTRL;
+        assert!(matches!(
+            shortcut(keyboard::Key::Character("1".into()), ctrl),
+            Some(Message::SelectTab(Tab::Messages))
+        ));
+        assert!(matches!(
+            shortcut(keyboard::Key::Character("3".into()), ctrl),
+            Some(Message::SelectTab(Tab::Map))
+        ));
+        assert!(matches!(
+            shortcut(keyboard::Key::Character("f".into()), ctrl),
+            Some(Message::FocusSearch)
+        ));
+        assert!(matches!(
+            shortcut(keyboard::Key::Character("q".into()), ctrl),
+            Some(Message::Quit)
+        ));
+    }
+
+    #[test]
+    fn escape_and_tab_are_mapped() {
+        let none = keyboard::Modifiers::NONE;
+        assert!(matches!(
+            shortcut(keyboard::Key::Named(keyboard::key::Named::Escape), none),
+            Some(Message::EscapePressed)
+        ));
+        assert!(matches!(
+            shortcut(keyboard::Key::Named(keyboard::key::Named::Tab), none),
+            Some(Message::FocusNext)
+        ));
+        assert!(matches!(
+            shortcut(
+                keyboard::Key::Named(keyboard::key::Named::Tab),
+                keyboard::Modifiers::SHIFT
+            ),
+            Some(Message::FocusPrevious)
+        ));
+    }
+
+    #[test]
+    fn plain_typing_is_not_hijacked() {
+        // A bare character reaches the focused text field untouched.
+        assert!(
+            shortcut(
+                keyboard::Key::Character("a".into()),
+                keyboard::Modifiers::NONE
+            )
+            .is_none()
+        );
+
+        // And an event a widget already consumed is never turned into an action.
+        assert!(
+            keyboard_shortcuts(
+                press(
+                    keyboard::Key::Character("q".into()),
+                    keyboard::Modifiers::CTRL
+                ),
+                iced::event::Status::Captured,
+                window::Id::unique(),
+            )
+            .is_none()
+        );
     }
 }

@@ -70,9 +70,22 @@ pub const LIGHT: Colors = Colors {
 /// Frame-active light/dark flag, set by `App::view`.
 static LIGHT_MODE: AtomicBool = AtomicBool::new(false);
 
+/// Frame-active high-contrast flag, set by `App::view`.
+static HIGH_CONTRAST: AtomicBool = AtomicBool::new(false);
+
 /// Set the palette used by the colour accessor functions for this frame.
 pub fn set_light_mode(light: bool) {
     LIGHT_MODE.store(light, Ordering::Relaxed);
+}
+
+/// Boost the contrast of borders and secondary text for this frame.
+pub fn set_high_contrast(high_contrast: bool) {
+    HIGH_CONTRAST.store(high_contrast, Ordering::Relaxed);
+}
+
+/// Whether high contrast is active for this frame.
+pub fn high_contrast() -> bool {
+    HIGH_CONTRAST.load(Ordering::Relaxed)
 }
 
 /// The palette for the current frame.
@@ -99,16 +112,28 @@ pub fn surface_alt() -> Color {
     current().surface_alt
 }
 pub fn border() -> Color {
-    current().border
+    if high_contrast() {
+        current().text_muted
+    } else {
+        current().border
+    }
 }
 pub fn text() -> Color {
     current().text
 }
 pub fn text_muted() -> Color {
-    current().text_muted
+    if high_contrast() {
+        current().text
+    } else {
+        current().text_muted
+    }
 }
 pub fn text_faint() -> Color {
-    current().text_faint
+    if high_contrast() {
+        current().text_muted
+    } else {
+        current().text_faint
+    }
 }
 pub fn primary() -> Color {
     current().primary

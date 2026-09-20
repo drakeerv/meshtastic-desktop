@@ -11,6 +11,9 @@ use crate::theme;
 use crate::widgets;
 use mt_persistence::{MessageRecord, MessageStatus};
 
+/// Widget id for the message composer, so a shortcut can focus it.
+pub const COMPOSE_INPUT_ID: &str = "message-compose";
+
 pub fn view(app: &App) -> Element<'_, Message> {
     row![sidebar(app), conversation_pane(app)]
         .width(Length::Fill)
@@ -553,6 +556,7 @@ fn compose(app: &App) -> Element<'_, Message> {
     };
 
     let mut input = text_input("Type a message…", &app.compose)
+        .id(COMPOSE_INPUT_ID)
         .on_input(Message::ComposeChanged)
         .style(theme::text_input_style)
         .padding(Padding::from([11, 14]))

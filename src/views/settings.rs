@@ -3,7 +3,8 @@
 //! (greyed out) while no node is connected.
 
 use iced::widget::{
-    Space, button, checkbox, column, container, pick_list, row, scrollable, text, text_input,
+    Space, button, checkbox, column, container, pick_list, row, scrollable, slider, text,
+    text_input,
 };
 use iced::{Alignment, Element, Font, Length, Padding};
 
@@ -174,6 +175,30 @@ fn app_page(app: &App) -> Element<'_, Message> {
                 checkbox(app.settings.imperial)
                     .on_toggle(Message::ToggleImperial)
                     .into(),
+            ),
+            setting_row(
+                "High contrast",
+                "Stronger borders and secondary text.",
+                checkbox(app.settings.high_contrast)
+                    .on_toggle(Message::ToggleHighContrast)
+                    .into(),
+            ),
+            setting_row(
+                "Interface scale",
+                "Scale the whole interface up or down. Applies when you release the slider.",
+                row![
+                    slider(0.75..=2.0, app.ui_scale_draft, Message::UiScalePreview)
+                        .step(0.05_f32)
+                        .on_release(Message::UiScaleCommitted)
+                        .width(Length::Fixed(200.0)),
+                    text(format!("{:.0}%", app.ui_scale_draft * 100.0))
+                        .size(12)
+                        .color(theme::text_muted())
+                        .width(Length::Fixed(48.0)),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .into(),
             ),
         ]
         .spacing(12)

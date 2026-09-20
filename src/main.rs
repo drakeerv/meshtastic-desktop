@@ -75,6 +75,7 @@ fn main() -> iced::Result {
     .title(|_: &App, _window: iced::window::Id| "Meshtastic".to_string())
     .theme(|app: &App, _window: iced::window::Id| app.theme())
     .subscription(|app: &App| app.subscription())
+    .scale_factor(|app: &App, _window: iced::window::Id| app.ui_scale())
     .antialiasing(true)
     .run()
 }

@@ -28,4 +28,12 @@ Roadmap ideas (roughly priority order):
 10. Localization.
     Fluent-based i18n; no scaffolding yet.
 11. Accessibility + keyboard shortcuts.
-    Shortcut palette, focus order, screen-reader labels.
+    Done: global shortcuts, Escape-to-dismiss, Tab focus traversal (text
+    fields only, since iced buttons are not focusable), high contrast, and a
+    live UI scale.
+    BLOCKED: real screen-reader support. iced 0.14 exposes no accessibility
+    tree (no AccessKit/AT-SPI at all), so Orca sees an empty window. Upstream
+    has an unmerged draft PR (iced-rs/iced#3111, accesskit-integration) that
+    currently conflicts and is partial. The durable fix is either that PR
+    landing or a GTK4/libadwaita UI port (the mt-* backend crates are
+    UI-agnostic and would carry over).

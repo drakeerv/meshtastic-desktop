@@ -10,6 +10,9 @@ use crate::theme;
 use crate::widgets;
 use meshtastic_protobufs::meshtastic::{NodeInfo, Position, User, telemetry};
 
+/// Widget id for the node search box, so a shortcut can focus it.
+pub const SEARCH_INPUT_ID: &str = "node-search";
+
 pub fn view(app: &crate::app::App) -> Element<'_, Message> {
     row![node_list(app), node_detail(app)]
         .width(Length::Fill)
@@ -35,6 +38,7 @@ fn node_list(app: &crate::app::App) -> Element<'_, Message> {
             .spacing(8)
             .align_y(Alignment::Center),
             text_input("Search by name or id…", &app.node_search)
+                .id(SEARCH_INPUT_ID)
                 .on_input(Message::NodeSearchChanged)
                 .style(theme::text_input_style)
                 .padding(Padding::from([9, 12]))

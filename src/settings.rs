@@ -57,6 +57,10 @@ pub struct AppSettings {
     pub use_ip_location: bool,
     /// Hide to the system tray instead of quitting when the window is closed.
     pub close_to_tray: bool,
+    /// Boost contrast of borders and secondary text.
+    pub high_contrast: bool,
+    /// Interface scale factor applied to the whole window (1.0 is default).
+    pub ui_scale: f32,
 }
 
 impl Default for AppSettings {
@@ -72,6 +76,8 @@ impl Default for AppSettings {
             online_tiles: false,
             use_ip_location: false,
             close_to_tray: true,
+            high_contrast: false,
+            ui_scale: 1.0,
         }
     }
 }
