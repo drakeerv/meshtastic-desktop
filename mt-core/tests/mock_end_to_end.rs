@@ -95,6 +95,40 @@ async fn mock_handshake_ingest_and_messaging() {
         handshake.node_names
     );
 
+    // A direct message is acked by the peer it was addressed to; hearing
+    // that ack must refresh the peer's last-heard time without a reconnect.
+    let dm_target = handshake
+        .node_nums
+        .iter()
+        .copied()
+        .find(|num| *num != handshake.node_num)
+        .expect("a peer to message");
+    core.dispatch(CoreCommand::SendText {
+        text: "direct hello".into(),
+        channel: 0,
+        to: Some(dm_target),
+        reply_id: None,
+    })
+    .await
+    .unwrap();
+    let heard = timeout(Duration::from_secs(2), async {
+        loop {
+            match events.recv().await {
+                Ok(CoreEvent::Node(node)) if node.num == dm_target && node.last_heard > 0 => {
+                    return node.last_heard;
+                }
+                Ok(_) => {}
+                Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => panic!("core event stream closed"),
+            }
+        }
+    })
+    .await;
+    assert!(
+        heard.is_ok(),
+        "direct-message ack should refresh the peer's last heard"
+    );
+
     // Send a channel message; the mock answers with a routing ack.
     core.dispatch(CoreCommand::SendText {
         text: "hello from the test".into(),

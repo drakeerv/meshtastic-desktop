@@ -210,6 +210,12 @@ async fn drive(
                         peripheral
                             .write(&chars.toradio, &bytes, WriteType::WithResponse)
                             .await?;
+                        // The firmware gates FROMNUM notifications behind
+                        // STATE_SEND_PACKETS, so during the config handshake a
+                        // write queues data without any notification arriving.
+                        // Poll proactively after every write, like the official
+                        // clients do.
+                        drain_from_radio(&peripheral, &chars, evt_tx, &mut junk).await?;
                     }
                     Some(TransportCommand::BlePasskey(_)) => {
                         // Pairing is already done by the time the link is up.

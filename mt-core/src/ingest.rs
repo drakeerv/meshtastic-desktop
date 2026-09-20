@@ -7,7 +7,7 @@ use meshtastic_protobufs::meshtastic::{
     MyNodeInfo, NodeInfo, PortNum, Position, RouteDiscovery, Telemetry, User, admin_message,
     from_radio, mesh_packet,
 };
-use mt_persistence::MessageStatus;
+use mt_persistence::{MessageStatus, now_unix};
 use prost::Message as _;
 
 use crate::events::CoreEvent;
@@ -122,8 +122,14 @@ impl Supervisor {
             PortNum::NodeinfoApp => self.on_nodeinfo_packet(&packet, &data),
             PortNum::TracerouteApp => self.on_traceroute_packet(&packet, &data),
             PortNum::AdminApp => self.on_admin_packet(&packet, &data),
-            _ => self.touch_node(&packet),
+            _ => {}
         }
+
+        // Every inbound packet proves its sender is alive, including
+        // routing acks and traceroute/admin replies that carry no other
+        // node bookkeeping. Applied after the port handlers so a payload's
+        // stale timestamp cannot overwrite the arrival time.
+        self.touch_node(&packet);
     }
 
     fn on_text_packet(&mut self, packet: &MeshPacket, _data: &Data) {
@@ -146,8 +152,6 @@ impl Supervisor {
 
         if outgoing {
             self.update_status(packet.id, true, MessageStatus::Enroute, None);
-        } else {
-            self.touch_node(packet);
         }
     }
 
@@ -157,28 +161,15 @@ impl Supervisor {
         };
         let node_num = packet.from;
 
-        if packet.rx_rssi != 0 {
-            self.state.rssi.insert(node_num, packet.rx_rssi as i32);
-            self.emit(CoreEvent::Rssi {
-                node_num,
-                rssi: packet.rx_rssi as i32,
-            });
-        }
-
+        // Signal metrics and last-heard are applied by the caller's final
+        // `touch_node`, so this only folds in the position itself.
         if let Some(mut node) = self.state.nodes.get(&node_num).cloned() {
             node.position = Some(position.clone());
-            if packet.rx_time != 0 {
-                node.last_heard = packet.rx_time;
-            }
-            if packet.rx_snr != 0.0 {
-                node.snr = packet.rx_snr;
-            }
             let node = self.state.upsert_node(node);
             if let Some(db) = &self.db {
                 let _ = db.upsert_node(&node);
                 let _ = db.insert_position(node_num, &position);
             }
-            self.emit(CoreEvent::Node(Box::new(node)));
         } else if let Some(db) = &self.db {
             let _ = db.insert_position(node_num, &position);
         }
@@ -200,7 +191,6 @@ impl Supervisor {
             node_num: packet.from,
             telemetry: Box::new(telemetry),
         });
-        self.touch_node(packet);
     }
 
     fn on_nodeinfo_packet(&mut self, packet: &MeshPacket, data: &Data) {
@@ -278,10 +268,7 @@ impl Supervisor {
     /// Update a known node's "heard" data (signal, hop count, timestamp).
     pub(crate) fn touch_node(&mut self, packet: &MeshPacket) {
         let num = packet.from;
-        if num == 0 || Some(num) == self.state.my_num() {
-            return;
-        }
-        if !self.state.nodes.contains_key(&num) {
+        if num == 0 || !self.state.nodes.contains_key(&num) {
             return;
         }
         let hops_away =
@@ -291,7 +278,7 @@ impl Supervisor {
             packet.rx_snr,
             packet.rx_rssi as i32,
             hops_away,
-            packet.rx_time,
+            packet_last_heard(packet),
         );
         if packet.rx_rssi != 0 {
             self.emit(CoreEvent::Rssi {
@@ -305,5 +292,102 @@ impl Supervisor {
             }
             self.emit(CoreEvent::Node(Box::new(node)));
         }
+    }
+}
+
+/// Timestamp to record for an arriving packet.
+///
+/// The radio stamps `rx_time` when it has a time source (GPS or a phone-set
+/// clock); when it does not, it sends zero and the host clock is the only
+/// reference. Timestamps from the radio's unsynced clock can also run ahead
+/// of the host, so they are clamped to now. Mirrors the official clients,
+/// which normalize every packet to `packet.rx_time` or their own clock.
+fn packet_last_heard(packet: &MeshPacket) -> u32 {
+    let now = now_unix().clamp(0, u32::MAX as i64) as u32;
+    match packet.rx_time {
+        0 => now,
+        t if t > now => now,
+        t => t,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use meshtastic_protobufs::meshtastic::{Routing, routing};
+    use tokio::sync::{broadcast, mpsc};
+
+    use crate::supervisor::CoreConfig;
+
+    fn supervisor() -> Supervisor {
+        let (event_tx, _) = broadcast::channel(16);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(4);
+        let mut supervisor = Supervisor::new(CoreConfig::default(), event_tx, cmd_rx);
+        supervisor.state.my_node_num = Some(1);
+        supervisor
+    }
+
+    fn routing_ack(from: u32, rx_time: u32) -> MeshPacket {
+        MeshPacket {
+            from,
+            to: 1,
+            rx_time,
+            payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
+                portnum: PortNum::RoutingApp as i32,
+                request_id: 42,
+                payload: Routing {
+                    variant: Some(routing::Variant::ErrorReason(routing::Error::None as i32)),
+                }
+                .encode_to_vec(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn routing_ack_refreshes_sender_last_heard() {
+        let mut supervisor = supervisor();
+        supervisor.state.upsert_node(NodeInfo {
+            num: 2,
+            ..Default::default()
+        });
+
+        supervisor.handle_packet(routing_ack(2, 1_700_000_000));
+
+        assert_eq!(supervisor.state.nodes[&2].last_heard, 1_700_000_000);
+    }
+
+    #[test]
+    fn unstamped_packet_falls_back_to_host_clock_and_clamps_future() {
+        let mut supervisor = supervisor();
+        supervisor.state.upsert_node(NodeInfo {
+            num: 2,
+            ..Default::default()
+        });
+
+        supervisor.handle_packet(routing_ack(2, 0));
+        let heard = supervisor.state.nodes[&2].last_heard;
+        assert!(heard > 0, "zero rx_time must still refresh last_heard");
+
+        let now = now_unix() as u32;
+        supervisor.handle_packet(routing_ack(2, now + 86_400));
+        assert!(
+            supervisor.state.nodes[&2].last_heard <= now_unix() as u32,
+            "future timestamps must be clamped to the host clock"
+        );
+    }
+
+    #[test]
+    fn outgoing_packet_refreshes_local_node() {
+        let mut supervisor = supervisor();
+        supervisor.state.upsert_node(NodeInfo {
+            num: 1,
+            ..Default::default()
+        });
+
+        supervisor.handle_packet(routing_ack(1, 1_700_000_000));
+
+        assert_eq!(supervisor.state.nodes[&1].last_heard, 1_700_000_000);
     }
 }

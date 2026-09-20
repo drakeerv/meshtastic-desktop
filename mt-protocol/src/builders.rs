@@ -47,6 +47,21 @@ pub fn disconnect() -> ToRadio {
     }
 }
 
+/// Sets the device's clock from the host clock (Unix seconds).
+///
+/// The official clients send this early in the handshake. Radios with no
+/// GPS or RTC leave `rx_time` at zero on received packets, and the firmware
+/// then skips `last_heard` updates entirely, so node timestamps go stale
+/// across reconnects. Sent to the local node with zero hops and no session
+/// passkey (the firmware skips passkey checks for client packets).
+pub fn set_time_only(seconds: u32) -> ToRadio {
+    admin_packet(
+        BROADCAST_ADDR,
+        admin(admin_message::PayloadVariant::SetTimeOnly(seconds)),
+        false,
+    )
+}
+
 /// Options for building a text message.
 #[derive(Debug, Clone)]
 pub struct TextMessage {
@@ -418,6 +433,24 @@ mod tests {
         };
         assert_eq!(p.hop_limit, DEFAULT_HOP_LIMIT);
         assert_eq!(p.to, 0xdead_beef);
+    }
+
+    #[test]
+    fn set_time_only_is_a_local_admin_packet() {
+        let m = set_time_only(1_700_000_000);
+        let Some(to_radio::PayloadVariant::Packet(p)) = m.payload_variant else {
+            panic!("no packet");
+        };
+        assert_eq!(p.to, BROADCAST_ADDR);
+        assert_eq!(p.hop_limit, 0);
+        let Some(mesh_packet::PayloadVariant::Decoded(d)) = p.payload_variant else {
+            panic!("not decoded");
+        };
+        let admin = AdminMessage::decode(d.payload.as_slice()).unwrap();
+        assert!(matches!(
+            admin.payload_variant,
+            Some(admin_message::PayloadVariant::SetTimeOnly(1_700_000_000))
+        ));
     }
 
     #[test]

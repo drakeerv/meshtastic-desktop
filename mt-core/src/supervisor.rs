@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use meshtastic_protobufs::meshtastic::{NodeInfo, SharedContact, ToRadio, admin_message};
-use mt_persistence::{Database, MessageFilter, MessageQuery};
+use mt_persistence::{Database, MessageFilter, MessageQuery, now_unix};
 use mt_transport::{DeviceAddress, TransportEvent, TransportHandle, spawn_transport};
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::{self, Instant};
@@ -745,6 +745,14 @@ impl Supervisor {
         self.state.handshake_nonce = Some(nonce);
         self.reconnect_attempt = 0;
         self.next_heartbeat = Instant::now() + self.cfg.heartbeat_interval;
+
+        // Hand the radio the host clock, like the official clients do.
+        // Radios without GPS or an RTC otherwise leave `rx_time` at zero on
+        // received packets, so their node database never refreshes the
+        // `last_heard` timestamps and every reconnect reloads stale values.
+        let _ = self
+            .send_to_radio(mt_protocol::builders::set_time_only(now_unix() as u32))
+            .await;
 
         // Persist the channel snapshot now that all slots are in.
         if let Some(db) = &self.db {

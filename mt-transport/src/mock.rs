@@ -465,15 +465,24 @@ async fn handle_mesh_packet(
 
         match port {
             PortNum::TextMessageApp => {
-                // Routing ack after a short delay.
+                // Routing ack after a short delay. Real firmware acks a
+                // direct message from the destination node; only channel
+                // broadcasts are acked by the local node. This mirrors the
+                // official clients' test mocks and is what lets the sender
+                // refresh the peer's last-heard time.
                 let ack_id = p.id;
+                let ack_from = if p.to == BROADCAST_ADDR {
+                    MY_NODE_NUM
+                } else {
+                    p.to
+                };
                 let evt_tx = evt_tx.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(1_500)).await;
                     let _ = evt_tx
                         .send(TransportEvent::FromRadio(packet_to_from_radio(
                             MeshPacket {
-                                from: MY_NODE_NUM,
+                                from: ack_from,
                                 to: 0, // to the phone/client
                                 id: 0,
                                 rx_time: now_unix(),
