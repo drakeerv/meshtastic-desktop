@@ -125,6 +125,16 @@ impl ConnectTab {
         ConnectTab::Ip,
     ];
 
+    /// Whether a transport kind belongs under this tab.
+    pub fn matches(self, kind: TransportKind) -> bool {
+        match self {
+            ConnectTab::All => true,
+            ConnectTab::Serial => kind == TransportKind::Serial,
+            ConnectTab::Bluetooth => kind == TransportKind::Ble,
+            ConnectTab::Ip => kind == TransportKind::Tcp,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             ConnectTab::All => "All",
@@ -232,7 +242,6 @@ pub enum Message {
     ConnectManual,
     ConnectTo(DeviceAddress),
     ConnectTabSelected(ConnectTab),
-    DeviceSearchChanged(String),
     DisconnectPressed,
     ResyncPressed,
 
@@ -388,7 +397,6 @@ pub struct App {
     pub devices: Vec<DiscoveredDevice>,
     pub manual_address: String,
     pub connect_tab: ConnectTab,
-    pub device_search: String,
     pub ble_scanning: bool,
 
     // messages view
@@ -493,7 +501,6 @@ impl App {
             devices: Vec::new(),
             manual_address: String::new(),
             connect_tab: ConnectTab::All,
-            device_search: String::new(),
             ble_scanning: false,
             conversation: Conversation::Channel(0),
             compose: String::new(),
@@ -860,37 +867,19 @@ impl App {
         true
     }
 
-    /// Nodes matching the current search, sorted favourites-first then name.
-    /// Discovered devices matching the active tab and search box.
-    pub fn filtered_devices(&self) -> Vec<&DiscoveredDevice> {
-        let needle = self.device_search.trim().to_lowercase();
+    /// Discovered devices matching the active transport tab.
+    pub fn tab_devices(&self) -> Vec<&DiscoveredDevice> {
         self.devices
             .iter()
-            .filter(|device| {
-                let kind_ok = match self.connect_tab {
-                    ConnectTab::All => true,
-                    ConnectTab::Serial => device.address.kind() == TransportKind::Serial,
-                    ConnectTab::Bluetooth => device.address.kind() == TransportKind::Ble,
-                    ConnectTab::Ip => device.address.kind() == TransportKind::Tcp,
-                };
-                let search_ok = needle.is_empty()
-                    || device.name.to_lowercase().contains(&needle)
-                    || device.address.to_string().to_lowercase().contains(&needle);
-                kind_ok && search_ok
-            })
+            .filter(|device| self.connect_tab.matches(device.address.kind()))
             .collect()
     }
 
-    /// How many discovered devices fall under `tab` (ignoring the search box).
+    /// How many discovered devices fall under `tab`.
     pub fn device_count(&self, tab: ConnectTab) -> usize {
         self.devices
             .iter()
-            .filter(|device| match tab {
-                ConnectTab::All => true,
-                ConnectTab::Serial => device.address.kind() == TransportKind::Serial,
-                ConnectTab::Bluetooth => device.address.kind() == TransportKind::Ble,
-                ConnectTab::Ip => device.address.kind() == TransportKind::Tcp,
-            })
+            .filter(|device| tab.matches(device.address.kind()))
             .count()
     }
 
@@ -1233,7 +1222,6 @@ impl App {
             }
             Message::ConnectTo(address) => self.connect(address),
             Message::ConnectTabSelected(tab) => self.connect_tab = tab,
-            Message::DeviceSearchChanged(value) => self.device_search = value,
             Message::DisconnectPressed => {
                 let _ = self.bridge.core().try_dispatch(CoreCommand::Disconnect);
             }
@@ -2500,7 +2488,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_tabs_and_search_filter_devices() {
+    async fn connect_tabs_filter_devices() {
         let core = mt_core::spawn_core(mt_core::CoreConfig::default());
         let discovery = mt_transport::spawn_discovery();
         let (mut app, _task) = App::new(core, discovery, AppSettings::default());
@@ -2523,13 +2511,11 @@ mod tests {
         assert_eq!(app.device_count(ConnectTab::Ip), 1);
 
         app.connect_tab = ConnectTab::Bluetooth;
-        assert_eq!(app.filtered_devices().len(), 1);
-        assert_eq!(app.filtered_devices()[0].name, "DH1_07f8");
+        assert_eq!(app.tab_devices().len(), 1);
+        assert_eq!(app.tab_devices()[0].name, "DH1_07f8");
 
         app.connect_tab = ConnectTab::All;
-        app.device_search = "base".into();
-        assert_eq!(app.filtered_devices().len(), 1);
-        assert_eq!(app.filtered_devices()[0].name, "Base Camp");
+        assert_eq!(app.tab_devices().len(), 3);
     }
 
     #[tokio::test]

@@ -70,7 +70,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         container(manual_entry(app))
             .width(Length::Fill)
             .padding(Padding::from([12, 22])),
-        container(column![tab_bar(app), search_row(app)].spacing(10))
+        container(tab_bar(app))
             .width(Length::Fill)
             .padding(Padding::from([0, 22])),
     ]
@@ -192,7 +192,7 @@ fn state_color(state: &ConnectionState) -> (iced::Color, &'static str) {
 fn manual_entry(app: &App) -> Element<'_, Message> {
     row![
         text_input(
-            "t192.168.1.42  ·  /dev/ttyUSB0  ·  aa:bb:cc:dd:ee:ff",
+            "192.168.1.42  ·  /dev/ttyUSB0  ·  aa:bb:cc:dd:ee:ff",
             &app.manual_address
         )
         .on_input(Message::ManualAddressChanged)
@@ -239,41 +239,26 @@ fn tab_bar(app: &App) -> Element<'_, Message> {
     tabs.into()
 }
 
-/// Filter discovered devices by name or address.
-fn search_row(app: &App) -> Element<'_, Message> {
-    text_input("Search discovered devices…", &app.device_search)
-        .on_input(Message::DeviceSearchChanged)
-        .style(theme::text_input_style)
-        .padding(Padding::from([9, 12]))
-        .size(13)
-        .width(Length::Fill)
-        .into()
-}
-
 fn device_list(app: &App) -> Element<'_, Message> {
-    let devices = app.filtered_devices();
+    let devices = app.tab_devices();
     if devices.is_empty() {
-        let hint = if app.device_search.trim().is_empty() {
-            match app.connect_tab {
-                ConnectTab::Serial => "No USB serial adapters found. Plug in a node over USB.",
-                ConnectTab::Bluetooth => {
-                    if app.ble_scanning {
-                        "Scanning… make sure your node is awake and in range."
-                    } else {
-                        "No Bluetooth nodes found yet. Start a scan."
-                    }
-                }
-                ConnectTab::Ip => "No WiFi nodes found. They appear via mDNS on the same network.",
-                ConnectTab::All => {
-                    if app.ble_scanning {
-                        "Scanning… make sure your node is awake and in range."
-                    } else {
-                        "No devices found yet. Start a Bluetooth scan, or connect by address above."
-                    }
+        let hint = match app.connect_tab {
+            ConnectTab::Serial => "No USB serial adapters found. Plug in a node over USB.",
+            ConnectTab::Bluetooth => {
+                if app.ble_scanning {
+                    "Scanning… make sure your node is awake and in range."
+                } else {
+                    "No Bluetooth nodes found yet. Start a scan."
                 }
             }
-        } else {
-            "No devices match your search."
+            ConnectTab::Ip => "No WiFi nodes found. They appear via mDNS on the same network.",
+            ConnectTab::All => {
+                if app.ble_scanning {
+                    "Scanning… make sure your node is awake and in range."
+                } else {
+                    "No devices found yet. Start a Bluetooth scan, or connect by address above."
+                }
+            }
         };
         return widgets::empty_state(
             lucide::bluetooth_searching()
