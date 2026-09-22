@@ -56,10 +56,10 @@ impl MeshState {
                 info.user = existing.user.clone();
             }
             if info.position.is_none() {
-                info.position = existing.position.clone();
+                info.position = existing.position;
             }
             if info.device_metrics.is_none() {
-                info.device_metrics = existing.device_metrics.clone();
+                info.device_metrics = existing.device_metrics;
             }
             if info.hops_away.is_none() {
                 info.hops_away = existing.hops_away;

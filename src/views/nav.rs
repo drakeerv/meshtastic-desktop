@@ -53,7 +53,9 @@ fn nav_item<'a>(app: &App, tab: Tab) -> Element<'a, Message> {
         Tab::Messages => lucide::message_square(),
         Tab::Nodes => lucide::radio_tower(),
         Tab::Map => lucide::map(),
-        Tab::Connect => lucide::bluetooth(),
+        // Connect covers Bluetooth, USB serial and WiFi alike, so avoid a
+        // transport-specific glyph here.
+        Tab::Connect => lucide::plug(),
         Tab::Settings => lucide::settings(),
     };
     let color = if active {
@@ -137,7 +139,7 @@ fn connection_indicator(app: &App) -> Element<'_, Message> {
             iced::widget::container::Style {
                 background: Some(color.into()),
                 border: Border {
-                    color: color,
+                    color,
                     width: 0.0,
                     radius: 999.0.into(),
                 },

@@ -350,7 +350,7 @@ mod tests {
         let msg = ToRadio {
             payload_variant: Some(to_radio::PayloadVariant::WantConfigId(69_420)),
         };
-        let framed = FrameEncoder::default().encode_to_radio(&msg);
+        let framed = FrameEncoder.encode_to_radio(&msg);
         assert_eq!(&framed[..2], &[START1, START2]);
         let len = ((framed[2] as usize) << 8) | framed[3] as usize;
         assert_eq!(len, framed.len() - 4);

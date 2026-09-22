@@ -164,7 +164,7 @@ impl Supervisor {
         // Signal metrics and last-heard are applied by the caller's final
         // `touch_node`, so this only folds in the position itself.
         if let Some(mut node) = self.state.nodes.get(&node_num).cloned() {
-            node.position = Some(position.clone());
+            node.position = Some(position);
             let node = self.state.upsert_node(node);
             if let Some(db) = &self.db {
                 let _ = db.upsert_node(&node);
@@ -207,8 +207,8 @@ impl Supervisor {
                 ..Default::default()
             };
             if let Some(existing) = self.state.nodes.get(&packet.from) {
-                node.position = existing.position.clone();
-                node.device_metrics = existing.device_metrics.clone();
+                node.position = existing.position;
+                node.device_metrics = existing.device_metrics;
             }
             self.on_node_info(node);
         }
@@ -320,14 +320,14 @@ impl Supervisor {
         self.state.note_heard(
             num,
             packet.rx_snr,
-            packet.rx_rssi as i32,
+            packet.rx_rssi,
             hops_away,
             packet_last_heard(packet),
         );
         if packet.rx_rssi != 0 {
             self.emit(CoreEvent::Rssi {
                 node_num: num,
-                rssi: packet.rx_rssi as i32,
+                rssi: packet.rx_rssi,
             });
         }
         if let Some(node) = self.state.nodes.get(&num).cloned() {

@@ -76,7 +76,7 @@ impl Supervisor {
     /// Handle a `QueueStatus` frame: it tells us a packet id was accepted
     /// by the radio, which moves unacknowledged messages to `Enroute`.
     pub(crate) fn handle_queue_status(&mut self, status: QueueStatus) {
-        self.emit(CoreEvent::QueueStatus(Box::new(status.clone())));
+        self.emit(CoreEvent::QueueStatus(Box::new(status)));
         let packet_id = status.mesh_packet_id;
         let Some(tracked) = self.state.outbound.get(&packet_id) else {
             return;

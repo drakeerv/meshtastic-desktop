@@ -281,7 +281,7 @@ pub enum Message {
     NodeSearchChanged(String),
     NodeSelected(u32),
     NodeDeselected,
-    OpenDirectMessage(u32),
+    OpenConversation(u32),
     /// Jump to the Nodes tab with this node selected.
     OpenNodeDetails(u32),
     ToggleFavorite(u32),
@@ -338,6 +338,8 @@ pub enum Message {
     WindowId(Option<window::Id>),
     /// The window manager asked to close a window.
     CloseRequested(window::Id),
+    /// A second launch asked the running instance to show its window.
+    ShowWindow,
     /// Hide to the tray instead of quitting when the window is closed.
     ToggleCloseToTray(bool),
 
@@ -464,6 +466,8 @@ pub struct App {
     pub manual_lon: String,
     /// Most recent host fix; resent when a sharing device connects.
     pub last_fix: Option<crate::location::Fix>,
+    /// Unix seconds the last fix arrived, for the age shown in settings.
+    pub last_fix_at: Option<i64>,
 
     pub now: i64,
     pub system_mode: Option<iced::theme::Mode>,
@@ -546,6 +550,7 @@ impl App {
             manual_lat: String::new(),
             manual_lon: String::new(),
             last_fix: None,
+            last_fix_at: None,
             now: mt_persistence::now_unix(),
             system_mode: None,
             tray: TrayHandle::spawn(),
@@ -626,7 +631,7 @@ impl App {
 
     /// Hand a host fix to the core as a local position packet.
     fn send_position(&self, fix: crate::location::Fix) {
-        tracing::debug!(
+        tracing::info!(
             source = fix.source,
             accuracy = fix.accuracy,
             latitude = fix.latitude,
@@ -1171,6 +1176,15 @@ impl App {
         open.map(|id| Message::WindowId(Some(id)))
     }
 
+    /// Bring the main window back: reopen it if it was closed to the tray,
+    /// otherwise ask the compositor to focus it.
+    fn show_window(&mut self) -> Task<Message> {
+        match self.window_id {
+            Some(id) => iced::window::gain_focus(id),
+            None => self.open_window(),
+        }
+    }
+
     /// Push the connection and node status to the tray, if it changed.
     fn sync_tray(&mut self) {
         let connected = self.is_connected();
@@ -1360,7 +1374,7 @@ impl App {
             Message::NodeSearchChanged(value) => self.node_search = value,
             Message::NodeSelected(num) => self.selected_node = Some(num),
             Message::NodeDeselected => self.selected_node = None,
-            Message::OpenDirectMessage(num) => {
+            Message::OpenConversation(num) => {
                 self.conversation = Conversation::Peer(num);
                 self.tab = Tab::Messages;
                 self.mark_active_conversation_read();
@@ -1441,11 +1455,11 @@ impl App {
                     .as_ref()
                     .is_some_and(|pairing| pairing.input.len() == 6)
                 {
-                    let _ = self.submit_ble_passkey();
+                    self.submit_ble_passkey();
                 }
             }
             Message::SubmitBlePasskey => {
-                let _ = self.submit_ble_passkey();
+                self.submit_ble_passkey();
             }
             Message::DismissBlePairing => {
                 self.ble_pairing = None;
@@ -1517,6 +1531,7 @@ impl App {
             }
             Message::HostLocationFix(Ok(fix)) => {
                 self.last_fix = Some(fix);
+                self.last_fix_at = Some(mt_persistence::now_unix());
                 if self.is_connected() && self.share_location_enabled() {
                     self.send_position(fix);
                 }
@@ -1559,6 +1574,7 @@ impl App {
             Message::SetManualPosition => self.set_manual_position(),
 
             Message::Tray(event) => return self.handle_tray(event),
+            Message::ShowWindow => return self.show_window(),
             Message::WindowId(id) => self.window_id = id,
             Message::CloseRequested(id) => {
                 if self.window_id == Some(id) {
@@ -1960,7 +1976,7 @@ impl App {
                     self.settings.save();
                     self.my_node_num = Some(*node_num);
                     self.ble_pairing = None;
-                    let _ = self.bridge.discovery().stop_ble_scan();
+                    self.bridge.discovery().try_stop_ble_scan();
                     // Push the latest known fix so the device starts sharing
                     // immediately even if the host has not moved since.
                     if self
@@ -2191,7 +2207,7 @@ impl App {
 
     fn apply_position(&mut self, node_num: u32, position: &Position) {
         if let Some(node) = self.nodes.get_mut(&node_num) {
-            node.position = Some(position.clone());
+            node.position = Some(*position);
             if position.time != 0 {
                 node.last_heard = position.time;
             }
@@ -2240,6 +2256,10 @@ impl App {
             iced::window::close_requests().map(Message::CloseRequested),
             iced::event::listen_with(keyboard_shortcuts),
         ];
+        // Show the window when a second launch asks the running instance to.
+        if let Some(instance) = crate::instance::handle() {
+            subscriptions.push(instance.subscription());
+        }
         // When "send on Enter" is off, the compose box has no submit handler,
         // so listen for Ctrl+Enter ourselves while the Messages tab is open.
         if self.tab == Tab::Messages && !self.settings.send_on_enter {

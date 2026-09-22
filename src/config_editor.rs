@@ -507,19 +507,15 @@ impl SectionValue {
     pub fn from_config(section: Section, config: &Config) -> Option<Self> {
         Some(match (section, config.payload_variant.as_ref()?) {
             (Section::Device, config::PayloadVariant::Device(c)) => SectionValue::Device(c.clone()),
-            (Section::Position, config::PayloadVariant::Position(c)) => {
-                SectionValue::Position(c.clone())
-            }
-            (Section::Power, config::PayloadVariant::Power(c)) => SectionValue::Power(c.clone()),
+            (Section::Position, config::PayloadVariant::Position(c)) => SectionValue::Position(*c),
+            (Section::Power, config::PayloadVariant::Power(c)) => SectionValue::Power(*c),
             (Section::Network, config::PayloadVariant::Network(c)) => {
                 SectionValue::Network(c.clone())
             }
-            (Section::Display, config::PayloadVariant::Display(c)) => {
-                SectionValue::Display(c.clone())
-            }
+            (Section::Display, config::PayloadVariant::Display(c)) => SectionValue::Display(*c),
             (Section::Lora, config::PayloadVariant::Lora(c)) => SectionValue::Lora(c.clone()),
             (Section::Bluetooth, config::PayloadVariant::Bluetooth(c)) => {
-                SectionValue::Bluetooth(c.clone())
+                SectionValue::Bluetooth(*c)
             }
             (Section::Security, config::PayloadVariant::Security(c)) => {
                 SectionValue::Security(c.clone())
@@ -534,11 +530,9 @@ impl SectionValue {
             (Section::Mqtt, module_config::PayloadVariant::Mqtt(c)) => {
                 SectionValue::Mqtt(c.clone())
             }
-            (Section::Serial, module_config::PayloadVariant::Serial(c)) => {
-                SectionValue::Serial(c.clone())
-            }
+            (Section::Serial, module_config::PayloadVariant::Serial(c)) => SectionValue::Serial(*c),
             (Section::Telemetry, module_config::PayloadVariant::Telemetry(c)) => {
-                SectionValue::Telemetry(c.clone())
+                SectionValue::Telemetry(*c)
             }
             (Section::CannedMessage, module_config::PayloadVariant::CannedMessage(c)) => {
                 SectionValue::CannedMessage(c.clone())
@@ -546,12 +540,12 @@ impl SectionValue {
             (
                 Section::ExternalNotification,
                 module_config::PayloadVariant::ExternalNotification(c),
-            ) => SectionValue::ExternalNotification(c.clone()),
+            ) => SectionValue::ExternalNotification(*c),
             (Section::StoreForward, module_config::PayloadVariant::StoreForward(c)) => {
-                SectionValue::StoreForward(c.clone())
+                SectionValue::StoreForward(*c)
             }
             (Section::RangeTest, module_config::PayloadVariant::RangeTest(c)) => {
-                SectionValue::RangeTest(c.clone())
+                SectionValue::RangeTest(*c)
             }
             _ => return None,
         })
@@ -561,12 +555,12 @@ impl SectionValue {
     pub fn to_config(&self) -> Option<Config> {
         let payload_variant = match self {
             SectionValue::Device(c) => config::PayloadVariant::Device(c.clone()),
-            SectionValue::Position(c) => config::PayloadVariant::Position(c.clone()),
-            SectionValue::Power(c) => config::PayloadVariant::Power(c.clone()),
+            SectionValue::Position(c) => config::PayloadVariant::Position(*c),
+            SectionValue::Power(c) => config::PayloadVariant::Power(*c),
             SectionValue::Network(c) => config::PayloadVariant::Network(c.clone()),
-            SectionValue::Display(c) => config::PayloadVariant::Display(c.clone()),
+            SectionValue::Display(c) => config::PayloadVariant::Display(*c),
             SectionValue::Lora(c) => config::PayloadVariant::Lora(c.clone()),
-            SectionValue::Bluetooth(c) => config::PayloadVariant::Bluetooth(c.clone()),
+            SectionValue::Bluetooth(c) => config::PayloadVariant::Bluetooth(*c),
             SectionValue::Security(c) => config::PayloadVariant::Security(c.clone()),
             _ => return None,
         };
@@ -579,16 +573,16 @@ impl SectionValue {
     pub fn to_module_config(&self) -> Option<ModuleConfig> {
         let payload_variant = match self {
             SectionValue::Mqtt(c) => module_config::PayloadVariant::Mqtt(c.clone()),
-            SectionValue::Serial(c) => module_config::PayloadVariant::Serial(c.clone()),
-            SectionValue::Telemetry(c) => module_config::PayloadVariant::Telemetry(c.clone()),
+            SectionValue::Serial(c) => module_config::PayloadVariant::Serial(*c),
+            SectionValue::Telemetry(c) => module_config::PayloadVariant::Telemetry(*c),
             SectionValue::CannedMessage(c) => {
                 module_config::PayloadVariant::CannedMessage(c.clone())
             }
             SectionValue::ExternalNotification(c) => {
-                module_config::PayloadVariant::ExternalNotification(c.clone())
+                module_config::PayloadVariant::ExternalNotification(*c)
             }
-            SectionValue::StoreForward(c) => module_config::PayloadVariant::StoreForward(c.clone()),
-            SectionValue::RangeTest(c) => module_config::PayloadVariant::RangeTest(c.clone()),
+            SectionValue::StoreForward(c) => module_config::PayloadVariant::StoreForward(*c),
+            SectionValue::RangeTest(c) => module_config::PayloadVariant::RangeTest(*c),
             _ => return None,
         };
         Some(ModuleConfig {
@@ -1267,7 +1261,7 @@ pub fn all_specs() -> &'static [&'static SectionSpec] {
 }
 
 pub fn spec(section: Section) -> &'static SectionSpec {
-    *all_specs()
+    all_specs()
         .iter()
         .find(|s| s.section == section)
         .expect("every Section has a spec")

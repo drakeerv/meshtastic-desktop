@@ -12,6 +12,7 @@ mod format;
 mod geoclue;
 mod host;
 mod icons;
+mod instance;
 mod location;
 mod map;
 mod security;
@@ -40,6 +41,18 @@ fn main() -> iced::Result {
             .build()
             .expect("failed to build the tokio runtime"),
     ));
+
+    // Single-instance guard: a second launch asks the running instance to show
+    // its window and exits before any backend is started.
+    match runtime.block_on(instance::acquire()) {
+        Ok(handle) => instance::install(handle),
+        Err(()) => {
+            eprintln!("Meshtastic is already running; asked the existing window to show.");
+            return Ok(());
+        }
+    }
+
+    // Enter the runtime so `tokio::spawn` in the backend targets it.
     let _guard = runtime.enter();
 
     let settings = settings::AppSettings::load();

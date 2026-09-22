@@ -112,84 +112,80 @@ fn primary_channel() -> Channel {
 }
 
 fn config_download() -> Vec<FromRadio> {
-    let mut msgs = Vec::new();
-
-    msgs.push(FromRadio {
-        id: 0,
-        payload_variant: Some(from_radio::PayloadVariant::MyInfo(MyNodeInfo {
-            my_node_num: MY_NODE_NUM,
-            reboot_count: 12,
-            min_app_version: 30_200,
-            ..Default::default()
-        })),
-    });
-
-    msgs.push(FromRadio {
-        id: 0,
-        payload_variant: Some(from_radio::PayloadVariant::Metadata(
-            meshtastic_protobufs::meshtastic::DeviceMetadata {
-                firmware_version: FIRMWARE_VERSION.to_string(),
-                device_state_version: 23,
-                can_shutdown: true,
-                ..Default::default()
-            },
-        )),
-    });
-
-    // Device + LoRa + position config sections.
-    msgs.push(FromRadio {
-        id: 0,
-        payload_variant: Some(from_radio::PayloadVariant::Config(Config {
-            payload_variant: Some(config::PayloadVariant::Device(config::DeviceConfig {
-                role: config::device_config::Role::Client as i32,
-                node_info_broadcast_secs: 900,
+    let mut msgs = vec![
+        FromRadio {
+            id: 0,
+            payload_variant: Some(from_radio::PayloadVariant::MyInfo(MyNodeInfo {
+                my_node_num: MY_NODE_NUM,
+                reboot_count: 12,
+                min_app_version: 30_200,
                 ..Default::default()
             })),
-        })),
-    });
-    msgs.push(FromRadio {
-        id: 0,
-        payload_variant: Some(from_radio::PayloadVariant::Config(Config {
-            payload_variant: Some(config::PayloadVariant::Lora(config::LoRaConfig {
-                region: config::lo_ra_config::RegionCode::Us as i32,
-                modem_preset: config::lo_ra_config::ModemPreset::LongFast as i32,
-                hop_limit: 3,
-                tx_enabled: true,
-                tx_power: 27,
-                use_preset: true,
-                channel_num: 38,
-                ..Default::default()
-            })),
-        })),
-    });
-    msgs.push(FromRadio {
-        id: 0,
-        payload_variant: Some(from_radio::PayloadVariant::Config(Config {
-            payload_variant: Some(config::PayloadVariant::Position(config::PositionConfig {
-                position_broadcast_secs: 900,
-                ..Default::default()
-            })),
-        })),
-    });
-
-    // A couple of module configs.
-    msgs.push(FromRadio {
-        id: 0,
-        payload_variant: Some(from_radio::PayloadVariant::ModuleConfig(ModuleConfig {
-            payload_variant: Some(module_config::PayloadVariant::Telemetry(
-                module_config::TelemetryConfig {
-                    device_update_interval: 300,
-                    environment_update_interval: 120,
+        },
+        FromRadio {
+            id: 0,
+            payload_variant: Some(from_radio::PayloadVariant::Metadata(
+                meshtastic_protobufs::meshtastic::DeviceMetadata {
+                    firmware_version: FIRMWARE_VERSION.to_string(),
+                    device_state_version: 23,
+                    can_shutdown: true,
                     ..Default::default()
                 },
             )),
-        })),
-    });
-
-    msgs.push(FromRadio {
-        id: 0,
-        payload_variant: Some(from_radio::PayloadVariant::Channel(primary_channel())),
-    });
+        },
+        // Device + LoRa + position config sections.
+        FromRadio {
+            id: 0,
+            payload_variant: Some(from_radio::PayloadVariant::Config(Config {
+                payload_variant: Some(config::PayloadVariant::Device(config::DeviceConfig {
+                    role: config::device_config::Role::Client as i32,
+                    node_info_broadcast_secs: 900,
+                    ..Default::default()
+                })),
+            })),
+        },
+        FromRadio {
+            id: 0,
+            payload_variant: Some(from_radio::PayloadVariant::Config(Config {
+                payload_variant: Some(config::PayloadVariant::Lora(config::LoRaConfig {
+                    region: config::lo_ra_config::RegionCode::Us as i32,
+                    modem_preset: config::lo_ra_config::ModemPreset::LongFast as i32,
+                    hop_limit: 3,
+                    tx_enabled: true,
+                    tx_power: 27,
+                    use_preset: true,
+                    channel_num: 38,
+                    ..Default::default()
+                })),
+            })),
+        },
+        FromRadio {
+            id: 0,
+            payload_variant: Some(from_radio::PayloadVariant::Config(Config {
+                payload_variant: Some(config::PayloadVariant::Position(config::PositionConfig {
+                    position_broadcast_secs: 900,
+                    ..Default::default()
+                })),
+            })),
+        },
+        // A couple of module configs.
+        FromRadio {
+            id: 0,
+            payload_variant: Some(from_radio::PayloadVariant::ModuleConfig(ModuleConfig {
+                payload_variant: Some(module_config::PayloadVariant::Telemetry(
+                    module_config::TelemetryConfig {
+                        device_update_interval: 300,
+                        environment_update_interval: 120,
+                        ..Default::default()
+                    },
+                )),
+            })),
+        },
+        FromRadio {
+            id: 0,
+            payload_variant: Some(from_radio::PayloadVariant::Channel(primary_channel())),
+        },
+    ];
 
     // Our own entry in the NodeDB.
     let mut own = NodeInfo {
@@ -326,7 +322,7 @@ pub(crate) async fn run(
     telemetry_tick.tick().await;
 
     let send = |msg: FromRadio, evt_tx: &mpsc::Sender<TransportEvent>| {
-        let _ = evt_tx.try_send(TransportEvent::FromRadio(msg));
+        let _ = evt_tx.try_send(TransportEvent::FromRadio(Box::new(msg)));
     };
 
     // Nodes the client has asked the device to forget.
@@ -449,7 +445,7 @@ async fn handle_toradio(
                 payload_variant: Some(from_radio::PayloadVariant::ConfigCompleteId(nonce)),
             });
             for m in msgs {
-                let _ = evt_tx.send(TransportEvent::FromRadio(m)).await;
+                let _ = evt_tx.send(TransportEvent::FromRadio(Box::new(m))).await;
             }
         }
         Some(To::Packet(p)) => handle_mesh_packet(p, evt_tx, removed).await,
@@ -472,7 +468,7 @@ async fn handle_mesh_packet(
 
         // Queue acceptance for any packet we "transmit".
         let _ = evt_tx
-            .send(TransportEvent::FromRadio(FromRadio {
+            .send(TransportEvent::FromRadio(Box::new(FromRadio {
                 id: 0,
                 payload_variant: Some(from_radio::PayloadVariant::QueueStatus(
                     meshtastic_protobufs::meshtastic::QueueStatus {
@@ -482,7 +478,7 @@ async fn handle_mesh_packet(
                         mesh_packet_id: p.id,
                     },
                 )),
-            }))
+            })))
             .await;
 
         match port {
@@ -502,9 +498,9 @@ async fn handle_mesh_packet(
                     if is_direct {
                         tokio::time::sleep(Duration::from_millis(700)).await;
                         let _ = evt_tx
-                            .send(TransportEvent::FromRadio(packet_to_from_radio(
+                            .send(TransportEvent::FromRadio(Box::new(packet_to_from_radio(
                                 routing_ack(MY_NODE_NUM, ack_id, channel),
-                            )))
+                            ))))
                             .await;
                     }
 
@@ -512,9 +508,9 @@ async fn handle_mesh_packet(
                     tokio::time::sleep(Duration::from_millis(if is_direct { 800 } else { 1_500 }))
                         .await;
                     let _ = evt_tx
-                        .send(TransportEvent::FromRadio(packet_to_from_radio(
+                        .send(TransportEvent::FromRadio(Box::new(packet_to_from_radio(
                             routing_ack(ack_from, ack_id, channel),
-                        )))
+                        ))))
                         .await;
 
                     // A remote node replies after a while.
@@ -522,9 +518,9 @@ async fn handle_mesh_packet(
                     let node = &cast[rand::rng().random_range(0..cast.len())];
                     tokio::time::sleep(Duration::from_millis(2_000)).await;
                     let _ = evt_tx
-                        .send(TransportEvent::FromRadio(packet_to_from_radio(
+                        .send(TransportEvent::FromRadio(Box::new(packet_to_from_radio(
                             text_packet(node.num, BROADCAST_ADDR, channel, "roger that 👍"),
-                        )))
+                        ))))
                         .await;
                 });
             }
@@ -542,7 +538,7 @@ async fn handle_mesh_packet(
                         tokio::time::sleep(Duration::from_millis(500)).await;
                         let relay = 0x0BAD_CAFE;
                         let _ = evt_tx
-                            .send(TransportEvent::FromRadio(packet_to_from_radio(
+                            .send(TransportEvent::FromRadio(Box::new(packet_to_from_radio(
                                 MeshPacket {
                                     from: target,
                                     to: MY_NODE_NUM,
@@ -564,7 +560,7 @@ async fn handle_mesh_packet(
                                     )),
                                     ..Default::default()
                                 },
-                            )))
+                            ))))
                             .await;
                     });
                 }
@@ -574,7 +570,7 @@ async fn handle_mesh_packet(
                 match admin.and_then(|a| a.payload_variant) {
                     Some(admin_message::PayloadVariant::GetOwnerRequest(_)) => {
                         let _ = evt_tx
-                            .send(TransportEvent::FromRadio(packet_to_from_radio(
+                            .send(TransportEvent::FromRadio(Box::new(packet_to_from_radio(
                                 MeshPacket {
                                     from: MY_NODE_NUM,
                                     to: 0,
@@ -596,12 +592,12 @@ async fn handle_mesh_packet(
                                     )),
                                     ..Default::default()
                                 },
-                            )))
+                            ))))
                             .await;
                     }
                     Some(admin_message::PayloadVariant::GetDeviceMetadataRequest(_)) => {
                         let _ = evt_tx
-                            .send(TransportEvent::FromRadio(FromRadio {
+                            .send(TransportEvent::FromRadio(Box::new(FromRadio {
                                 id: 0,
                                 payload_variant: Some(from_radio::PayloadVariant::Metadata(
                                     meshtastic_protobufs::meshtastic::DeviceMetadata {
@@ -611,7 +607,7 @@ async fn handle_mesh_packet(
                                         ..Default::default()
                                     },
                                 )),
-                            }))
+                            })))
                             .await;
                     }
                     Some(admin_message::PayloadVariant::RemoveByNodenum(num)) => {
@@ -623,7 +619,7 @@ async fn handle_mesh_packet(
             PortNum::PositionApp if data.want_response => {
                 // Someone asked where we are.
                 let _ = evt_tx
-                    .send(TransportEvent::FromRadio(packet_to_from_radio(
+                    .send(TransportEvent::FromRadio(Box::new(packet_to_from_radio(
                         MeshPacket {
                             from: MY_NODE_NUM,
                             to: p.from,
@@ -643,7 +639,7 @@ async fn handle_mesh_packet(
                             })),
                             ..Default::default()
                         },
-                    )))
+                    ))))
                     .await;
             }
             _ => {}
@@ -705,13 +701,15 @@ mod tests {
 
         let mut names = Vec::new();
         while let Ok(event) = rx.try_recv() {
-            if let TransportEvent::FromRadio(FromRadio {
-                payload_variant: Some(from_radio::PayloadVariant::NodeInfo(node)),
-                ..
-            }) = event
-            {
-                if let Some(user) = node.user {
-                    names.push(user.long_name);
+            if let TransportEvent::FromRadio(msg) = event {
+                if let FromRadio {
+                    payload_variant: Some(from_radio::PayloadVariant::NodeInfo(node)),
+                    ..
+                } = *msg
+                {
+                    if let Some(user) = node.user {
+                        names.push(user.long_name);
+                    }
                 }
             }
         }

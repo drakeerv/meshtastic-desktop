@@ -500,6 +500,11 @@ fn device_page(app: &App) -> Element<'_, Message> {
                     .into(),
             ),
             setting_row(
+                "Last fix",
+                "The most recent host location the provider reported.",
+                last_fix_readout(app),
+            ),
+            setting_row(
                 "Allow IP-based location",
                 "If GeoClue2 and gpsd are unavailable, fall back to a city-level fix from an IP lookup service. This shares the public IP with a third party.",
                 checkbox(app.settings.use_ip_location)
@@ -772,6 +777,50 @@ fn link_row(
     .into()
 }
 
+/// The last host-location fix: provider, accuracy, age and coordinates.
+fn last_fix_readout(app: &App) -> Element<'_, Message> {
+    let Some(fix) = app.last_fix else {
+        return text("No fix yet")
+            .size(13)
+            .color(theme::text_faint())
+            .into();
+    };
+
+    let age = app
+        .last_fix_at
+        .map(|at| fix_age(at, app.now))
+        .unwrap_or_default();
+
+    column![
+        row![
+            widgets::tag(fix.source, theme::primary()),
+            text(format!("±{:.0} m", fix.accuracy))
+                .size(12)
+                .color(theme::text_muted()),
+            text(age).size(11).color(theme::text_faint()),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+        text(format!("{:.5}, {:.5}", fix.latitude, fix.longitude))
+            .size(12)
+            .color(theme::text_muted()),
+    ]
+    .spacing(3)
+    .align_x(Alignment::End)
+    .into()
+}
+
+/// A short age such as `12s ago` or `3m ago`.
+fn fix_age(at: i64, now: i64) -> String {
+    let delta = (now - at).max(0);
+    match delta {
+        0..=1 => "just now".to_string(),
+        2..=59 => format!("{delta}s ago"),
+        60..=3_599 => format!("{}m ago", delta / 60),
+        _ => format!("{}h ago", delta / 3_600),
+    }
+}
+
 fn setting_row<'a>(
     title: &'a str,
     description: &'a str,
@@ -922,9 +971,8 @@ fn log_level_color(line: &str) -> iced::Color {
         theme::warning()
     } else if line.contains("DEBUG") || line.contains("[D]") {
         theme::text_faint()
-    } else if line.contains("INFO") || line.contains("[I]") {
-        theme::text_muted()
     } else {
+        // INFO and anything unrecognised share the default muted colour.
         theme::text_muted()
     }
 }

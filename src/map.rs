@@ -54,14 +54,14 @@ fn inverse_mercator(y: f64) -> f64 {
 }
 
 impl MapView {
-    pub(crate) fn to_screen(&self, lat: f64, lon: f64, size: Size) -> Point {
+    pub(crate) fn to_screen(self, lat: f64, lon: f64, size: Size) -> Point {
         Point::new(
             size.width / 2.0 + (lon.to_radians() - self.lon.to_radians()) as f32 * self.scale,
             size.height / 2.0 - (mercator_y(lat) - mercator_y(self.lat)) as f32 * self.scale,
         )
     }
 
-    fn to_geo(&self, point: Point, size: Size) -> (f64, f64) {
+    fn to_geo(self, point: Point, size: Size) -> (f64, f64) {
         let lon = self.lon.to_radians() + ((point.x - size.width / 2.0) / self.scale) as f64;
         let y = mercator_y(self.lat) - ((point.y - size.height / 2.0) / self.scale) as f64;
         (inverse_mercator(y), lon.to_degrees())
@@ -157,7 +157,7 @@ impl MapProgram {
         for node in &self.nodes {
             let p = view.to_screen(node.lat, node.lon, bounds.size());
             let distance = (p.x - point.x).hypot(p.y - point.y);
-            if distance <= 16.0 && best.map_or(true, |(_, d)| distance < d) {
+            if distance <= 16.0 && best.is_none_or(|(_, d)| distance < d) {
                 best = Some((node.num, distance));
             }
         }
@@ -429,7 +429,7 @@ fn draw_graticule(frame: &mut Frame, view: &MapView, size: Size) {
         let y = view.to_screen(lat, view.lon, size).y;
         frame.stroke(
             &Path::line(Point::new(0.0, y), Point::new(size.width, y)),
-            stroke.clone(),
+            stroke,
         );
         lat += step;
     }
@@ -442,7 +442,7 @@ fn draw_graticule(frame: &mut Frame, view: &MapView, size: Size) {
         let x = view.to_screen(view.lat, lon, size).x;
         frame.stroke(
             &Path::line(Point::new(x, 0.0), Point::new(x, size.height)),
-            stroke.clone(),
+            stroke,
         );
         lon += step;
     }
@@ -473,13 +473,10 @@ fn draw_scale_bar(frame: &mut Frame, view: &MapView, size: Size) {
     let stroke = Stroke::default()
         .with_color(theme::text_muted())
         .with_width(2.0);
-    frame.stroke(
-        &Path::line(Point::new(x0, y), Point::new(x1, y)),
-        stroke.clone(),
-    );
+    frame.stroke(&Path::line(Point::new(x0, y), Point::new(x1, y)), stroke);
     frame.stroke(
         &Path::line(Point::new(x0, y - 4.0), Point::new(x0, y + 4.0)),
-        stroke.clone(),
+        stroke,
     );
     frame.stroke(
         &Path::line(Point::new(x1, y - 4.0), Point::new(x1, y + 4.0)),
@@ -679,8 +676,10 @@ mod tests {
             }),
             online: false,
         };
-        let mut state = MapState::default();
-        state.last_bounds = Some(size());
+        let mut state = MapState {
+            last_bounds: Some(size()),
+            ..Default::default()
+        };
         let action = program
             .update(
                 &mut state,
@@ -708,8 +707,10 @@ mod tests {
             }),
             online: false,
         };
-        let mut state = MapState::default();
-        state.last_bounds = Some(size());
+        let mut state = MapState {
+            last_bounds: Some(size()),
+            ..Default::default()
+        };
         let marker = program
             .effective_view(bounds())
             .to_screen(37.8, -122.27, size());

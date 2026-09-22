@@ -267,7 +267,7 @@ impl Supervisor {
                         self.handshake_retried = false;
                         self.handshake_deadline = Instant::now() + self.cfg.handshake_timeout;
                     }
-                    Some(TransportEvent::FromRadio(msg)) => self.handle_from_radio(msg).await,
+                    Some(TransportEvent::FromRadio(msg)) => self.handle_from_radio(*msg).await,
                     Some(TransportEvent::DeviceLog(line)) => self.emit(CoreEvent::DeviceLog(line)),
                     Some(TransportEvent::BlePairingRequest { address }) => {
                         self.emit(CoreEvent::BlePairingRequest { address })
@@ -605,7 +605,7 @@ impl Supervisor {
         // Reflect the fix in the node list immediately; the firmware's
         // NodeInfo stream confirms it a moment later.
         if let Some(mut node) = self.state.nodes.get(&my_num).cloned() {
-            node.position = Some(position.clone());
+            node.position = Some(position);
             node.last_heard = now_unix() as u32;
             let node = self.state.upsert_node(node);
             if let Some(db) = &self.db {

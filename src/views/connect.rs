@@ -9,6 +9,29 @@ use crate::theme;
 use crate::widgets;
 use mt_core::{ConnectionState, TransportKind};
 
+/// A Lucide glyph before it is sized and coloured.
+type Glyph = iced::widget::Text<'static>;
+
+/// The glyph for a transport kind, used by group headings and empty states.
+fn kind_glyph(kind: TransportKind) -> Glyph {
+    match kind {
+        TransportKind::Ble => lucide::bluetooth(),
+        TransportKind::Serial => lucide::usb(),
+        TransportKind::Tcp => lucide::wifi(),
+        TransportKind::Mock => lucide::flask_conical(),
+    }
+}
+
+/// The glyph for a connect tab.
+fn tab_glyph(tab: ConnectTab) -> Glyph {
+    match tab {
+        ConnectTab::All => lucide::list(),
+        ConnectTab::Serial => lucide::usb(),
+        ConnectTab::Bluetooth => lucide::bluetooth(),
+        ConnectTab::Ip => lucide::wifi(),
+    }
+}
+
 pub fn view(app: &App) -> Element<'_, Message> {
     let header_actions = vec![
         if app.ble_scanning {
@@ -112,13 +135,12 @@ fn connection_card(app: &App) -> Element<'_, Message> {
         .map(|n| format!("{} ({})", app.node_name(n), crate::format::node_id(n)))
         .unwrap_or_else(|| "No device connected".to_string());
 
-    let subtitle = app
-        .conn
-        .address()
-        .map(|a| a.to_string())
-        .unwrap_or_else(|| {
-            "Pick a discovered device below, or enter an address by hand.".to_string()
-        });
+    // Show the raw address (MAC, path, or host:port) rather than the internal
+    // `x`/`s`/`t` transport prefix, which stays parseable for power users but
+    // is not worth surfacing here.
+    let subtitle = app.conn.address().map(|a| a.label()).unwrap_or_else(|| {
+        "Pick a discovered device below, or enter an address by hand.".to_string()
+    });
 
     let mut details = row![widgets::tag(label, color)]
         .spacing(10)
@@ -225,8 +247,18 @@ fn tab_bar(app: &App) -> Element<'_, Message> {
         } else {
             tab.label().to_string()
         };
+        // Match the button style's text colour so the glyph reads as part of
+        // the label.
+        let color = if active {
+            iced::Color::from_rgb8(9, 20, 14)
+        } else {
+            theme::text()
+        };
+        let content = row![tab_glyph(tab).size(14).color(color), text(label).size(13),]
+            .spacing(6)
+            .align_y(Alignment::Center);
         tabs = tabs.push(
-            button(text(label).size(13))
+            button(content)
                 .padding(Padding::from([7, 14]))
                 .style(if active {
                     theme::primary_button
@@ -261,7 +293,7 @@ fn device_list(app: &App) -> Element<'_, Message> {
             }
         };
         return widgets::empty_state(
-            lucide::bluetooth_searching()
+            tab_glyph(app.connect_tab)
                 .size(42)
                 .color(theme::text_faint())
                 .into(),
@@ -286,9 +318,14 @@ fn device_list(app: &App) -> Element<'_, Message> {
         if found {
             list = list.push(
                 column![
-                    text(heading.to_uppercase())
-                        .size(11)
-                        .color(theme::text_faint()),
+                    row![
+                        kind_glyph(kind).size(12).color(theme::text_faint()),
+                        text(heading.to_uppercase())
+                            .size(11)
+                            .color(theme::text_faint()),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
                     rows,
                 ]
                 .spacing(6)

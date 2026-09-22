@@ -26,7 +26,7 @@ where
 {
     let _ = evt_tx.send(TransportEvent::Connected).await;
 
-    let encoder = FrameEncoder::default();
+    let encoder = FrameEncoder;
     let mut decoder = FrameDecoder::new();
     let mut junk = JunkLogger::default();
     let mut read_buf = vec![0u8; 4096];
@@ -64,7 +64,7 @@ where
                     match event {
                         DecodeEvent::Frame(payload) => match decode_from_radio(&payload) {
                             Ok(msg) => {
-                                if evt_tx.send(TransportEvent::FromRadio(msg)).await.is_err() {
+                                if evt_tx.send(TransportEvent::FromRadio(Box::new(msg))).await.is_err() {
                                     return Err(TransportError::Shutdown);
                                 }
                             }

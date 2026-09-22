@@ -3,8 +3,7 @@
 //! Implements the official GATT protocol:
 //!
 //! - `TORADIO`   (write)      - client pushes `ToRadio` protobufs
-//! - `FROMRADIO` (read)       - client drains until the read comes back
-//!                              empty
+//! - `FROMRADIO` (read)       - client drains until the read comes back empty
 //! - `FROMNUM`   (notify)     - signals that `FROMRADIO` has data
 //! - `LOGRADIO`  (notify)     - optional device log stream
 //!
@@ -265,7 +264,11 @@ async fn drain_from_radio(
         }
         match decode_from_radio(&payload) {
             Ok(msg) => {
-                if evt_tx.send(TransportEvent::FromRadio(msg)).await.is_err() {
+                if evt_tx
+                    .send(TransportEvent::FromRadio(Box::new(msg)))
+                    .await
+                    .is_err()
+                {
                     return Err(TransportError::Shutdown);
                 }
             }

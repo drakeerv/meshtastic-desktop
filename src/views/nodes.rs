@@ -251,7 +251,7 @@ fn node_detail(app: &crate::app::App) -> Element<'_, Message> {
             ))
             .padding(Padding::from([7, 12]))
             .style(theme::primary_button)
-            .on_press(Message::OpenDirectMessage(node.num)),
+            .on_press(Message::OpenConversation(node.num)),
             button(lucide::x().size(15).color(theme::text_muted()))
                 .padding(Padding::from([7, 10]))
                 .style(theme::ghost_button)

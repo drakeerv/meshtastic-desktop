@@ -322,7 +322,10 @@ pub enum TransportEvent {
     /// final event; carry an error when the cause is abnormal.
     Disconnected { error: Option<TransportError> },
     /// A decoded `FromRadio` message from the node.
-    FromRadio(FromRadio),
+    ///
+    /// Boxed to keep `TransportEvent` small: the protobuf dwarfs every other
+    /// variant and these events travel through bounded channels.
+    FromRadio(Box<FromRadio>),
     /// A line of device debug output (serial junk / BLE LOGRADIO).
     DeviceLog(String),
     /// BLE pairing needs the passkey shown on the device's screen.
