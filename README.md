@@ -108,10 +108,13 @@ cargo run --release
   adapters mishandle LE Secure Connections; an RTL8761BU (for example the
   TP-Link UB500) or an Intel AX210/BE200 works reliably.
 
-- **Desktop integration**: install the app icon and `.desktop` entry so the
-  window is associated with its icon (requires ImageMagick's `magick`):
+- **Desktop integration**: install the binary, then the app icon and
+  `.desktop` entry so the window is associated with its icon. The entry points
+  at the `cargo install`ed binary, so install it first (requires ImageMagick's
+  `magick`):
 
   ```sh
+  cargo install --path .
   scripts/install-desktop.sh
   ```
 
