@@ -382,7 +382,7 @@ fn conversation_header(app: &App) -> Element<'_, Message> {
                 .style(theme::secondary_button)
                 .on_press(Message::OpenNodeDetails(peer)),
             );
-            (node_avatar(app, peer), app.node_name(peer), subtitle)
+            (profile_avatar(app, peer), app.node_name(peer), subtitle)
         }
     };
 
@@ -559,25 +559,40 @@ fn message_bubble<'a>(app: &'a App, record: &'a MessageRecord) -> Element<'a, Me
             .into();
     }
 
-    // Incoming: show the sender's avatar, and their name on channels.
+    // Incoming: show the sender's avatar, and their name on channels. Both
+    // open the sender's profile card, so a DM can be started from a channel.
     let mut body = column![].spacing(3).align_x(Alignment::Start);
     if matches!(app.conversation, Conversation::Channel(_)) {
         body = body.push(
-            text(app.node_name(record.from))
-                .size(11)
-                .color(theme::primary_dim()),
+            button(
+                text(app.node_name(record.from))
+                    .size(11)
+                    .color(theme::primary_dim()),
+            )
+            .padding(Padding::from([0, 0]))
+            .style(theme::ghost_button)
+            .on_press(Message::OpenProfile(record.from)),
         );
     }
     body = body.push(bubble);
 
     row![
-        node_avatar(app, record.from),
+        profile_avatar(app, record.from),
         body,
         Space::new().width(Length::Fill),
     ]
     .spacing(8)
     .align_y(Alignment::End)
     .into()
+}
+
+/// The sender's avatar, clickable to open their profile card.
+fn profile_avatar(app: &App, num: u32) -> Element<'static, Message> {
+    button(node_avatar(app, num))
+        .padding(Padding::from([0, 0]))
+        .style(theme::ghost_button)
+        .on_press(Message::OpenProfile(num))
+        .into()
 }
 
 fn status_color(status: MessageStatus) -> Color {

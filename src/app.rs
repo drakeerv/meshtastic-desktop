@@ -284,6 +284,10 @@ pub enum Message {
     OpenConversation(u32),
     /// Jump to the Nodes tab with this node selected.
     OpenNodeDetails(u32),
+    /// Open the quick profile card for a node.
+    OpenProfile(u32),
+    /// Dismiss the quick profile card.
+    CloseProfile,
     ToggleFavorite(u32),
     ToggleIgnored(u32),
     RequestPosition(u32),
@@ -428,6 +432,8 @@ pub struct App {
     // nodes view
     pub node_search: String,
     pub selected_node: Option<u32>,
+    /// The node whose quick profile card is open, if any.
+    pub profile_node: Option<u32>,
     /// The open contact QR dialog, if any.
     pub contact_qr: Option<ContactQr>,
     /// The open contact import dialog, if any.
@@ -531,6 +537,7 @@ impl App {
             pending_confirm: None,
             node_search: String::new(),
             selected_node: None,
+            profile_node: None,
             contact_qr: None,
             contact_import: None,
             ble_pairing: None,
@@ -685,7 +692,9 @@ impl App {
             })
     }
 
-    /// Direct-message partners, derived from the message history.
+    /// Direct-message targets: partners from the message history, plus every
+    /// favourite (contact) without history yet, most recently heard first. So
+    /// adding a contact surfaces a DM entry before any message is exchanged.
     pub fn peers(&self) -> Vec<u32> {
         let Some(me) = self.my_node_num else {
             return Vec::new();
@@ -704,6 +713,13 @@ impl App {
                 peers.push(other);
             }
         }
+        let mut contacts: Vec<&NodeInfo> = self
+            .nodes
+            .values()
+            .filter(|node| node.is_favorite && node.num != me && !peers.contains(&node.num))
+            .collect();
+        contacts.sort_by_key(|node| std::cmp::Reverse(node.last_heard));
+        peers.extend(contacts.into_iter().map(|node| node.num));
         peers
     }
 
@@ -1129,7 +1145,9 @@ impl App {
 
     /// Close the topmost dismissible UI, or clear the node selection.
     fn escape_pressed(&mut self) {
-        if self.pending_confirm.is_some() {
+        if self.profile_node.is_some() {
+            self.profile_node = None;
+        } else if self.pending_confirm.is_some() {
             self.pending_confirm = None;
         } else if self.contact_import.is_some() {
             self.contact_import = None;
@@ -1376,13 +1394,17 @@ impl App {
             Message::NodeDeselected => self.selected_node = None,
             Message::OpenConversation(num) => {
                 self.conversation = Conversation::Peer(num);
+                self.profile_node = None;
                 self.tab = Tab::Messages;
                 self.mark_active_conversation_read();
             }
             Message::OpenNodeDetails(num) => {
                 self.selected_node = Some(num);
+                self.profile_node = None;
                 self.tab = Tab::Nodes;
             }
+            Message::OpenProfile(num) => self.profile_node = Some(num),
+            Message::CloseProfile => self.profile_node = None,
             Message::ToggleFavorite(num) => {
                 let favorite = !self.nodes.get(&num).map(|n| n.is_favorite).unwrap_or(false);
                 if let Some(node) = self.nodes.get_mut(&num) {
@@ -1921,10 +1943,20 @@ impl App {
             .map(|preview| preview.name.clone())
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| format::node_id(contact.node_num));
+        let num = contact.node_num;
         let _ = self
             .bridge
             .core()
             .try_dispatch(CoreCommand::AddContact(Box::new(contact)));
+        // Star the imported node so it appears under DIRECT MESSAGES right
+        // away, rather than waiting for the device's NodeInfo round-trip.
+        let _ = self.bridge.core().try_dispatch(CoreCommand::SetFavorite {
+            node_num: num,
+            favorite: true,
+        });
+        if let Some(node) = self.nodes.get_mut(&num) {
+            node.is_favorite = true;
+        }
         self.contact_import = None;
         self.push_notice(format!("importing contact {name}"));
     }
@@ -2318,7 +2350,8 @@ impl App {
 
         let dialog = views::messages::confirm_overlay(self)
             .or_else(|| views::contact::overlay(self))
-            .or_else(|| views::pairing::overlay(self));
+            .or_else(|| views::pairing::overlay(self))
+            .or_else(|| views::profile::overlay(self));
         match dialog {
             Some(dialog) => iced::widget::stack![base, dialog]
                 .width(Length::Fill)

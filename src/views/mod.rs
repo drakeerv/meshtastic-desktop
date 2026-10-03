@@ -9,4 +9,5 @@ pub mod messages;
 pub mod nav;
 pub mod nodes;
 pub mod pairing;
+pub mod profile;
 pub mod settings;
